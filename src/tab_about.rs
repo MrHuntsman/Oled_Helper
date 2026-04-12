@@ -216,7 +216,7 @@ impl AboutTab {
             }
             1 => {
                 let release = *Box::from_raw(lparam as *mut ReleaseInfo);
-                let msg: Vec<u16> = format!("v{} available\0", release.tag)
+                let msg: Vec<u16> = format!("{} available\0", release.tag)
                     .encode_utf16().collect();
                 SetWindowTextW(self.h_lbl_check_info, PCWSTR(msg.as_ptr()));
                 // Make label clickable — STN_CLICKED will call on_open_releases().
