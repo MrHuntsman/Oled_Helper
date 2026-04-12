@@ -1,1 +1,2 @@
-echo "/target" > .gitignore
+/target
+Cargo.lock
