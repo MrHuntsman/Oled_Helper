@@ -1,0 +1,55 @@
+#pragma code_page(65001)
+1 VERSIONINFO
+FILETYPE 0x1
+FILESUBTYPE 0x0
+FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
+FILEVERSION 1, 0, 0, 0
+PRODUCTVERSION 1, 0, 0, 0
+FILEOS 0x40004
+{
+BLOCK "StringFileInfo"
+{
+BLOCK "000004b0"
+{
+VALUE "ProductName", "oled-helper"
+VALUE "FileDescription", "oled-helper"
+VALUE "ProductVersion", "1.0.0-Beta"
+VALUE "FileVersion", "1.0.0-Beta"
+}
+}
+BLOCK "VarFileInfo" {
+VALUE "Translation", 0x0, 0x04b0
+}
+}
+MAINICON ICON "oled_helper.ico"
+1 24
+{
+" <?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?> "
+" <assembly xmlns=""urn:schemas-microsoft-com:asm.v1"" manifestVersion=""1.0""> "
+" <application xmlns=""urn:schemas-microsoft-com:asm.v3""> "
+" <windowsSettings> "
+" <dpiAware xmlns=""http://schemas.microsoft.com/SMI/2005/WindowsSettings""> "
+" true/PM "
+" </dpiAware> "
+" <dpiAwareness xmlns=""http://schemas.microsoft.com/SMI/2016/WindowsSettings""> "
+" PerMonitorV2, PerMonitor "
+" </dpiAwareness> "
+" </windowsSettings> "
+" </application> "
+" <!-- comctl32 v6: required for visual styles (themed trackbar thumb, blue accent) --> "
+" <dependency> "
+" <dependentAssembly> "
+" <assemblyIdentity "
+" type=""win32"" "
+" name=""Microsoft.Windows.Common-Controls"" "
+" version=""6.0.0.0"" "
+" processorArchitecture=""*"" "
+" publicKeyToken=""6595b64144ccf1df"" "
+" language=""*"" "
+" /> "
+" </dependentAssembly> "
+" </dependency> "
+" </assembly> "
+}
+
