@@ -1,20 +1,20 @@
 #pragma code_page(65001)
 1 VERSIONINFO
-FILEFLAGS 0x0
+FILESUBTYPE 0x0
+FILETYPE 0x1
+PRODUCTVERSION 1, 0, 0, 0
 FILEOS 0x40004
 FILEVERSION 1, 0, 0, 0
-PRODUCTVERSION 1, 0, 0, 0
-FILETYPE 0x1
-FILESUBTYPE 0x0
 FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
 {
 BLOCK "StringFileInfo"
 {
 BLOCK "000004b0"
 {
 VALUE "ProductName", "oled-helper"
-VALUE "FileVersion", "1.0.0-Beta"
 VALUE "FileDescription", "oled-helper"
+VALUE "FileVersion", "1.0.0-Beta"
 VALUE "ProductVersion", "1.0.0-Beta"
 }
 }
