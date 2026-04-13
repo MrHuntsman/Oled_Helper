@@ -1,7 +1,5 @@
 // tab_hdr.rs — HDR tab (tab index 2).
-//
-// Contains: title label, Enable HDR toggle pill, and SDR Content Brightness
-// slider (mirrors the Windows HDR display settings page).
+// Contains: title label, Enable HDR toggle pill, and SDR Content Brightness slider.
 
 #![allow(non_snake_case, dead_code)]
 
@@ -30,16 +28,15 @@ use crate::{
 pub const IDC_SLD_SDR_BRIGHTNESS: usize = 151;
 
 pub struct HdrTab {
-    // ── Title ─────────────────────────────────────────────────────────────────
+    // Title
     pub h_lbl_title: HWND,
 
-    // ── Toggle pill (Enable HDR) ───────────────────────────────────────────────
-    /// The pill-style toggle button (owner-drawn).  Kept from the dimmer tab.
+    // Enable HDR toggle pill (owner-drawn, reuses IDC_BTN_HDR_TOGGLE)
     pub h_btn_toggle: HWND,
     /// Whether HDR is currently enabled.
     pub enabled: bool,
 
-    // ── SDR Content Brightness section ────────────────────────────────────────
+    // SDR Content Brightness section
     pub h_lbl_sdr_sect:       HWND,
     pub h_sep_sdr_sect:       HWND,
     pub h_sld_sdr_brightness: HWND,
@@ -47,7 +44,7 @@ pub struct HdrTab {
     /// Current SDR brightness value (0–100).
     pub sdr_brightness: i32,
 
-    /// All controls in this tab — used by show_tab to batch-show/hide.
+    /// All controls in this tab — batch show/hide on tab switch.
     pub group: ControlGroup,
 }
 
@@ -62,16 +59,14 @@ impl HdrTab {
         let cb_normal = ControlBuilder { parent, hinstance, dpi, font: font_normal };
         let cb_title  = ControlBuilder { parent, hinstance, dpi, font: font_title  };
 
-        // ── Title ─────────────────────────────────────────────────────────────
         let h_lbl_title = cb_title.static_text(w!("HDR"), SS_NOPREFIX);
 
-        // ── Enable HDR toggle ─────────────────────────────────────────────────
-        // Re-uses IDC_BTN_HDR_TOGGLE (150) so the existing on_command handler
-        // fires toggle_hdr_via_shortcut() without any extra wiring.
+        // Reuses IDC_BTN_HDR_TOGGLE (150) so the existing on_command handler
+        // fires toggle_hdr_via_shortcut() without extra wiring.
         const IDC_BTN_HDR_TOGGLE: usize = 150;
         let h_btn_toggle = cb_normal.button(w!("Enable HDR"), IDC_BTN_HDR_TOGGLE);
 
-        // ── Section heading (11pt bold — matches dimmer / crush tabs) ─────────
+        // Section heading: 11pt bold
         let font_sect = make_font_cached(w!("Segoe UI"), 11, dpi, true);
         let h_lbl_sdr_sect = CreateWindowExW(
             WS_EX_LEFT, w!("STATIC"), w!("SDR Content Brightness"),
@@ -86,7 +81,7 @@ impl HdrTab {
             0, 0, 1, 1, parent, HMENU(ptr::null_mut()), hinstance, None,
         ).unwrap_or_default();
 
-        // ── Slider (0–100, initial 50) ────────────────────────────────────────
+        // Slider (0–100, initial 50)
         let h_sld_sdr_brightness = CreateWindowExW(
             WS_EX_LEFT,
             w!("msctls_trackbar32"),
@@ -103,7 +98,7 @@ impl HdrTab {
         SendMessageW(h_sld_sdr_brightness, TBM_SETTHUMBLENGTH, WPARAM(thumb_px as usize), LPARAM(0));
         let _ = SetWindowSubclass(h_sld_sdr_brightness, Some(slider_subclass_proc), 1, 0);
 
-        // ── Value label (bold, right of slider — matches h_lbl_dim_pct) ───────
+        // Value label (bold, right of slider)
         let font_bold_val = make_font_cached(w!("Segoe UI"), 10, dpi, true);
         let h_lbl_sdr_val = CreateWindowExW(
             WS_EX_LEFT, w!("STATIC"), w!("50"),

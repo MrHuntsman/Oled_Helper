@@ -1,4 +1,4 @@
-// tray.rs — System-tray icon and popup menu helpers.
+// tray.rs — System tray icon and popup menu.
 
 use std::mem;
 
@@ -25,9 +25,8 @@ use windows::{
 
 use crate::constants::WM_TRAY_CALLBACK;
 
-/// Build the tray right-click popup menu.
-/// Returns the HMENU — caller owns it and must pass it to `remove_tray_icon`
-/// for cleanup via `DestroyMenu`.
+/// Build the right-click popup menu. Caller owns the HMENU and must pass it
+/// to `remove_tray_icon` for cleanup.
 #[allow(unused_must_use)]
 pub unsafe fn build_tray_menu() -> HMENU {
     let menu = CreatePopupMenu().unwrap_or_default();
@@ -41,7 +40,7 @@ pub unsafe fn build_tray_menu() -> HMENU {
     menu
 }
 
-/// Add the app icon to the system tray and set `tray_added` to `true`.
+/// Register the app icon in the system tray and set `tray_added = true`.
 #[allow(unused_must_use)]
 pub unsafe fn add_tray_icon(hwnd: HWND, hinstance: HINSTANCE, tray_added: &mut bool) {
     let icon = LoadIconW(hinstance, w!("MAINICON"))
@@ -63,15 +62,15 @@ pub unsafe fn add_tray_icon(hwnd: HWND, hinstance: HINSTANCE, tray_added: &mut b
     *tray_added = true;
 }
 
-/// Show a balloon notification on the tray icon informing the user the app
-/// minimized to tray.  Safe to call only after `add_tray_icon` has succeeded.
+/// Show a balloon notification that the app has minimized to tray.
+/// Only call after `add_tray_icon` has succeeded.
 #[allow(unused_must_use)]
 pub unsafe fn show_tray_balloon(hwnd: HWND) {
     let mut nid = NOTIFYICONDATAW {
-        cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
-        hWnd:   hwnd,
-        uID:    1,
-        uFlags: NIF_INFO,
+        cbSize:      mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd:        hwnd,
+        uID:         1,
+        uFlags:      NIF_INFO,
         dwInfoFlags: NIIF_INFO,
         ..Default::default()
     };
@@ -84,20 +83,19 @@ pub unsafe fn show_tray_balloon(hwnd: HWND) {
     let m_len = msg.len().min(255);
     nid.szInfoTitle[..t_len].copy_from_slice(&title[..t_len]);
     nid.szInfo[..m_len].copy_from_slice(&msg[..m_len]);
-    // uTimeout is ignored on Vista+ but set it anyway for XP compat.
-    nid.Anonymous.uTimeout = 3000;
+    nid.Anonymous.uTimeout = 3000; // ignored on Vista+, kept for XP compat
 
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-/// Remove the tray icon (if present) and destroy the popup menu.
+/// Remove the tray icon and destroy the popup menu.
 #[allow(unused_must_use)]
 pub unsafe fn remove_tray_icon(hwnd: HWND, tray_menu: HMENU, tray_added: &mut bool) {
     if *tray_added {
         let nid = NOTIFYICONDATAW {
             cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: hwnd,
-            uID: 1,
+            hWnd:   hwnd,
+            uID:    1,
             ..Default::default()
         };
         Shell_NotifyIconW(NIM_DELETE, &nid);

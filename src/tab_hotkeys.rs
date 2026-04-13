@@ -1,16 +1,14 @@
 // tab_hotkeys.rs — Hotkeys settings tab.
 //
-// Each hotkey row consists of:
-//   • A label describing the action
-//   • An owner-drawn "pill" button that captures key combos on focus
-//   • A small "×" clear button to reset a single binding
+// Each hotkey row: action label, owner-drawn pill button that captures key
+// combos on focus, and a "×" clear button.
 //
-// The pill button is BS_OWNERDRAW. When focused it shows an accent-coloured
-// border and intercepts WM_KEYDOWN/WM_SYSKEYDOWN via a subclass proc to
-// record key combos. WM_DRAWITEM in app.rs calls draw_hotkey_pill() here.
+// The pill is BS_OWNERDRAW. When focused it shows an accent border and
+// intercepts WM_KEYDOWN/WM_SYSKEYDOWN via subclass to record combos.
+// WM_DRAWITEM in app.rs calls draw_hotkey_pill().
 //
-// Auto-save: every key-capture and every clear fires EN_CHANGE-style
-// notification so app.rs can persist + re-register immediately.
+// Every capture and clear fires an EN_CHANGE-style notify so app.rs can
+// persist and re-register immediately.
 
 #![allow(unused_must_use, non_snake_case)]
 use std::mem;
@@ -39,19 +37,16 @@ use crate::{
 // Re-export so app.rs can call it from WM_DRAWITEM.
 pub use self::draw::draw_hotkey_pill;
 
-// ── Mouse-button sentinel codes ────────────────────────────────────────────────
+// ── Mouse-button sentinel codes ───────────────────────────────────────────────
 //
 // Synthetic VK-like values stored in the pill text and INI.
-// Live above the real VK range (0x00–0xFF) so they never collide.
-// Left/right click and mousewheel are intentionally excluded.
+// Live above the real VK range (0x00–0xFF) — no collisions.
+// Left/right click and wheel are intentionally excluded.
 //
-// Windows raw-input and WH_MOUSE_LL report extra buttons as XBUTTON events
-// whose HIWORD(mouseData) is a 16-bit button-index bitmask.  Mice with many
-// programmable buttons (e.g. Razer Naga, Logitech G600) can report indices
-// 1–16.  We reserve one sentinel per index so every button gets a stable
-// round-trip through the INI.
+// WH_MOUSE_LL reports extra buttons as XBUTTON events whose HIWORD(mouseData)
+// is a 1-based button-index. We reserve one sentinel per index (1–16) for a
+// stable round-trip through the INI.
 pub const MB_MIDDLE:    u32 = 0x10000; // Middle click (WM_MBUTTONDOWN)
-// XBUTTON indices 1–16 (HIWORD of mouseData in WM_XBUTTONDOWN / MSLLHOOKSTRUCT)
 pub const MB_XBUTTON1:  u32 = 0x10001; // Mouse4  – back
 pub const MB_XBUTTON2:  u32 = 0x10002; // Mouse5  – forward
 pub const MB_XBUTTON3:  u32 = 0x10003; // Mouse6
@@ -70,7 +65,7 @@ pub const MB_XBUTTON15: u32 = 0x1000F; // Mouse18
 pub const MB_XBUTTON16: u32 = 0x10010; // Mouse19
 
 /// Convert a 1-based XBUTTON index (HIWORD of mouseData) to its sentinel.
-/// Returns None for index 0 or anything above 16.
+/// Returns `None` for index 0 or above 16.
 #[inline]
 pub fn xbutton_index_to_sentinel(idx: u16) -> Option<u32> {
     match idx {
@@ -92,7 +87,7 @@ pub fn is_mouse_sentinel(vk: u32) -> bool {
     vk >= MB_MIDDLE && vk <= MB_XBUTTON16
 }
 
-// ── Key-name table ─────────────────────────────────────────────────────────────
+// ── Key-name table ────────────────────────────────────────────────────────────
 
 fn vk_name(vk: u32) -> Option<&'static str> {
     Some(match vk {
@@ -124,7 +119,7 @@ fn vk_name(vk: u32) -> Option<&'static str> {
         0xBA => ";",  0xBB => "=",  0xBC => ",",  0xBD => "-",
         0xBE => ".",  0xBF => "/",  0xC0 => "`",
         0xDB => "[",  0xDC => "\\", 0xDD => "]",  0xDE => "'",
-        // Mouse button sentinels (not real VKs)
+        // Mouse sentinels (not real VKs)
         x if x == MB_MIDDLE    => "MButton",
         x if x == MB_XBUTTON1  => "Mouse4",
         x if x == MB_XBUTTON2  => "Mouse5",
@@ -155,7 +150,7 @@ pub unsafe fn format_hotkey(vk: u32) -> Option<String> {
         _ => {}
     }
     let key_name = vk_name(vk)?;
-    // Mouse button sentinels carry no keyboard modifiers.
+    // Mouse sentinels carry no keyboard modifiers.
     let is_mouse = is_mouse_sentinel(vk);
     let ctrl  = !is_mouse && (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16) & 0x8000 != 0;
     let shift = !is_mouse && (GetAsyncKeyState(VK_SHIFT.0   as i32) as u16) & 0x8000 != 0;
@@ -171,20 +166,19 @@ pub unsafe fn format_hotkey(vk: u32) -> Option<String> {
     Some(s)
 }
 
-// ── Property names ─────────────────────────────────────────────────────────────
+// ── Property names ────────────────────────────────────────────────────────────
 
 const PROP_ORIG_PROC: PCWSTR = w!("BCT_HkOrigProc");
-/// Stored as 1 when the pill button has keyboard focus.
+/// Set to 1 when the pill has keyboard focus.
 pub const PROP_HK_FOCUSED: PCWSTR = w!("BCT_HkFocused");
-/// Stored as 1 while the user is "recording" (focus + waiting for a key).
+/// Set to 1 while waiting for a key (focus + no key yet confirmed).
 pub const PROP_HK_RECORDING: PCWSTR = w!("BCT_HkRecording");
-/// Heap-allocated UTF-16 string snapshot of the text at focus-gain, used to
-/// restore on cancel (click-away without pressing a key).
+/// Heap-allocated UTF-16 snapshot of text at focus-gain; restored on cancel.
 const PROP_HK_SAVED_TEXT: PCWSTR = w!("BCT_HkSavedText");
-/// Non-null while the cursor is hovering over the pill (used by draw_hotkey_pill).
+/// Non-null while the cursor is hovering (read by draw_hotkey_pill).
 const PROP_HK_HOVERED: PCWSTR = w!("BCT_HkHovered");
 
-// ── Pill-button subclass proc ──────────────────────────────────────────────────
+// ── Pill-button subclass proc ─────────────────────────────────────────────────
 //
 // Installed on every owner-drawn hotkey pill button.
 // • WM_SETFOCUS / WM_KILLFOCUS  — track focus state and repaint
@@ -210,35 +204,30 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
         WM_SETFOCUS => {
             SetPropW(hwnd, PROP_HK_FOCUSED,   HANDLE(1 as *mut _));
             SetPropW(hwnd, PROP_HK_RECORDING, HANDLE(1 as *mut _));
-            // Free any pre-existing snapshot to avoid a memory leak on unexpected
-            // re-focus (e.g. SetFocus called twice without an intervening KillFocus).
+            // Free any pre-existing snapshot to avoid a leak on unexpected re-focus.
             let old_ptr = GetPropW(hwnd, PROP_HK_SAVED_TEXT).0 as *mut Vec<u16>;
-            if !old_ptr.is_null() {
-                drop(Box::from_raw(old_ptr));
-            }
-            // Snapshot current text so we can restore it if the user clicks away.
+            if !old_ptr.is_null() { drop(Box::from_raw(old_ptr)); }
+            // Snapshot current text so we can restore it on click-away.
             let mut buf = [0u16; 256];
             let len = GetWindowTextW(hwnd, &mut buf) as usize;
             let snapshot: Box<Vec<u16>> = Box::new(buf[..len+1].to_vec()); // includes NUL
             SetPropW(hwnd, PROP_HK_SAVED_TEXT, HANDLE(Box::into_raw(snapshot) as *mut _));
-            // Capture the mouse so we receive WM_LBUTTONDOWN even when the user
-            // clicks on non-focusable areas (background, static labels, separators).
-            // Without capture, clicks on those targets move no focus and the pill
-            // stays stuck in recording mode indefinitely.
+            // Capture the mouse so WM_LBUTTONDOWN fires even on non-focusable areas
+            // (background, labels, separators). Without capture the pill can get stuck
+            // in recording mode if the user clicks away from any button.
             SetCapture(hwnd);
             InvalidateRect(hwnd, None, false);
             call_orig()
         }
 
         WM_KILLFOCUS => {
-            // If still recording (no key was confirmed), restore the snapshot.
+            // Restore snapshot if recording was cancelled (no key confirmed).
             let was_recording = !GetPropW(hwnd, PROP_HK_RECORDING).0.is_null();
             let saved_ptr = GetPropW(hwnd, PROP_HK_SAVED_TEXT).0 as *mut Vec<u16>;
             if was_recording && !saved_ptr.is_null() {
                 let saved = &*saved_ptr;
                 SetWindowTextW(hwnd, PCWSTR(saved.as_ptr()));
             }
-            // Free the snapshot regardless.
             if !saved_ptr.is_null() {
                 drop(Box::from_raw(saved_ptr));
                 RemovePropW(hwnd, PROP_HK_SAVED_TEXT);
@@ -247,9 +236,7 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
             RemovePropW(hwnd, PROP_HK_RECORDING);
             // Release capture if we still own it (focus may have moved via keyboard
             // or programmatically rather than through our WM_LBUTTONDOWN handler).
-            if GetCapture() == hwnd {
-                ReleaseCapture();
-            }
+            if GetCapture() == hwnd { ReleaseCapture(); }
             InvalidateRect(hwnd, None, false);
             call_orig()
         }
@@ -269,22 +256,19 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
                 RemovePropW(hwnd, PROP_HK_RECORDING);
                 InvalidateRect(hwnd, None, false);
                 notify_parent_changed(hwnd);
-                // Release capture then move focus so WM_KILLFOCUS fires cleanly.
                 if GetCapture() == hwnd { ReleaseCapture(); }
                 let parent = GetParent(hwnd).unwrap_or_default();
                 SetFocus(parent);
                 return LRESULT(0);
             }
             if let Some(s) = format_hotkey(vk) {
-                // Before committing, clear the same binding on any sibling pill
-                // so each hotkey can only be assigned to one action at a time.
+                // Clear the same binding on any sibling pill — one action per hotkey.
                 clear_duplicate_siblings(hwnd, &s);
                 let ws: Vec<u16> = s.encode_utf16().chain([0]).collect();
                 SetWindowTextW(hwnd, PCWSTR(ws.as_ptr()));
                 RemovePropW(hwnd, PROP_HK_RECORDING);
                 InvalidateRect(hwnd, None, false);
                 notify_parent_changed(hwnd);
-                // Release capture then move focus so WM_KILLFOCUS fires cleanly.
                 if GetCapture() == hwnd { ReleaseCapture(); }
                 let parent = GetParent(hwnd).unwrap_or_default();
                 SetFocus(parent);
@@ -316,7 +300,7 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
 
         WM_CHAR | WM_SYSCHAR | WM_DEADCHAR | WM_SYSDEADCHAR => LRESULT(0),
 
-        // Middle-click and extra buttons (Mouse4…Mouse19) can be bound while recording.
+        // Middle-click and Mouse4–Mouse19 can be bound while recording.
         // Left/right click and wheel are intentionally excluded.
         WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
             if GetPropW(hwnd, PROP_HK_RECORDING).0.is_null() {
@@ -325,7 +309,7 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
             let vk = if msg == WM_MBUTTONDOWN {
                 MB_MIDDLE
             } else {
-                // XBUTTON id is in the high word of wp (1-based index)
+                // XBUTTON id is in the high word of wp (1-based index).
                 let idx = ((wp.0 >> 16) & 0xFFFF) as u16;
                 match xbutton_index_to_sentinel(idx) {
                     Some(s) => s,
@@ -346,12 +330,10 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
             LRESULT(0)
         }
 
-        // While recording we own mouse capture (set in WM_SETFOCUS), so every
-        // WM_LBUTTONDOWN in the whole window arrives here.  If the click is
-        // outside the pill, cancel recording.  We release capture and move focus
-        // to the parent; WM_KILLFOCUS restores the saved text.  The subsequent
-        // WM_LBUTTONUP (still captured) is eaten harmlessly, and the user can
-        // click again normally on whatever they want.
+        // We own mouse capture while recording, so every WM_LBUTTONDOWN in the
+        // whole window arrives here. If the click is outside the pill, cancel
+        // recording — release capture and move focus; WM_KILLFOCUS restores text.
+        // The subsequent WM_LBUTTONUP (still captured) is eaten harmlessly.
         WM_LBUTTONDOWN => {
             if !GetPropW(hwnd, PROP_HK_RECORDING).0.is_null() {
                 let x = (lp.0 & 0xFFFF) as i16 as i32;
@@ -360,8 +342,6 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
                 GetClientRect(hwnd, &mut rc);
                 let inside = x >= rc.left && x < rc.right && y >= rc.top && y < rc.bottom;
                 if !inside {
-                    // Release capture first so focus transfer works correctly,
-                    // then move focus to parent — WM_KILLFOCUS will restore text.
                     ReleaseCapture();
                     let parent = GetParent(hwnd).unwrap_or_default();
                     SetFocus(parent);
@@ -373,8 +353,8 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
             call_orig()
         }
 
-        // WM_CAPTURECHANGED fires when something else steals capture (e.g. a
-        // drag starts elsewhere).  Treat it the same as clicking away.
+        // WM_CAPTURECHANGED fires when something else steals capture.
+        // Treat it the same as clicking away.
         WM_CAPTURECHANGED => {
             if !GetPropW(hwnd, PROP_HK_RECORDING).0.is_null() {
                 // Don't call ReleaseCapture — we no longer own it.
@@ -384,15 +364,12 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
             call_orig()
         }
 
-        // Left-click release → enter recording mode, but only when:
+        // Enter recording mode on left-click release, but only when:
         //   • the release is over the button (not a drag-off), AND
         //   • the pill is not already recording.
-        // If we are already recording, WM_LBUTTONDOWN already fired the cancel
-        // path (ReleaseCapture + SetFocus(parent) + WM_KILLFOCUS), so by the
-        // time WM_LBUTTONUP arrives here the pill is no longer focused.  Calling
-        // SetFocus again would immediately re-enter recording mode.
-        // call_orig() is always called so the default button proc repaints the
-        // depressed state correctly.
+        // If already recording, WM_LBUTTONDOWN already cancelled (ReleaseCapture
+        // + SetFocus(parent)), so the pill is no longer focused by now. Calling
+        // SetFocus again would immediately re-enter recording — avoid that.
         WM_LBUTTONUP => {
             let already_recording = !GetPropW(hwnd, PROP_HK_RECORDING).0.is_null();
             let x = (lp.0 & 0xFFFF) as i16 as i32;
@@ -401,16 +378,13 @@ pub unsafe extern "system" fn hotkey_pill_subclass_proc(
             GetClientRect(hwnd, &mut rc);
             let over_button = x >= rc.left && x < rc.right && y >= rc.top && y < rc.bottom;
             if over_button && !already_recording {
-                if GetFocus() != hwnd {
-                    SetFocus(hwnd);
-                }
+                if GetFocus() != hwnd { SetFocus(hwnd); }
                 return LRESULT(0);
             }
             call_orig()
         }
 
-        // Safety net: free snapshot and clear all props if window is destroyed
-        // while still focused or recording.
+        // Free snapshot and clear all props if destroyed while focused/recording.
         WM_NCDESTROY => {
             let saved_ptr = GetPropW(hwnd, PROP_HK_SAVED_TEXT).0 as *mut Vec<u16>;
             if !saved_ptr.is_null() {
@@ -439,16 +413,14 @@ unsafe fn notify_parent_changed(hwnd: HWND) {
     );
 }
 
-/// Walk all sibling pill buttons (identified by PROP_HK_RECORDING presence or
-/// the BCT_HkOrigProc property) and reset any that already show `combo` to
-/// "None", then notify the parent so the change is auto-saved.
+/// Reset any sibling pill showing `combo` to "None" and notify the parent.
+/// Ensures each hotkey is assigned to at most one action.
 unsafe fn clear_duplicate_siblings(hwnd: HWND, combo: &str) {
     let parent = match GetParent(hwnd) {
         Ok(p) => p,
         Err(_) => return,
     };
-    // Enumerate direct children of the parent looking for sibling pills.
-    // A pill is identified by having the PROP_ORIG_PROC property installed.
+    // A pill is identified by having PROP_ORIG_PROC installed.
     let mut child = GetWindow(parent, GW_CHILD).unwrap_or_default();
     while !child.0.is_null() {
         if child != hwnd && !GetPropW(child, PROP_ORIG_PROC).0.is_null() {
@@ -467,14 +439,13 @@ unsafe fn clear_duplicate_siblings(hwnd: HWND, combo: &str) {
     }
 }
 
-// ── Drawing ────────────────────────────────────────────────────────────────────
+// ── Drawing ───────────────────────────────────────────────────────────────────
 
 mod draw {
     use super::*;
     use windows::Win32::Graphics::Gdi::*;
 
     /// Paint one hotkey pill from WM_DRAWITEM.
-    /// Called by app.rs's WM_DRAWITEM handler.
     pub unsafe fn draw_hotkey_pill(di: &DRAWITEMSTRUCT) {
         let hdc = di.hDC;
         let rc  = di.rcItem;
@@ -489,8 +460,7 @@ mod draw {
 
         let accent = get_accent_color();
 
-        // ── Background ────────────────────────────────────────────────────────
-        // Lighten slightly on hover; lighter still when pressed.
+        // Background: lighten on hover, lighter still when pressed.
         let bg_color = if pressed       { COLORREF(0x00404040) }
                        else if hovered  { COLORREF(0x00363636) }
                        else             { COLORREF(0x002A2A2A) };
@@ -498,8 +468,7 @@ mod draw {
         FillRect(hdc, &rc, bg_br);
         DeleteObject(bg_br);
 
-        // ── Rounded-rect border ───────────────────────────────────────────────
-        // Always draw a subtle 1px border; brighten it on hover.
+        // Rounded-rect border: subtle 1px, brightened on hover.
         let radius = s(6);
         let border_color = if hovered { COLORREF(0x00666666) } else { COLORREF(0x00484848) };
         let pen    = CreatePen(PS_SOLID, 1, border_color);
@@ -510,13 +479,11 @@ mod draw {
         SelectObject(hdc, old_br);
         DeleteObject(pen);
 
-        // ── Accent underline (focused only) ───────────────────────────────────
-        // Draw a 2dp accent-coloured bar along the bottom edge, inset from the
-        // side corners so it sits cleanly inside the rounded rect.
+        // Accent underline (focused only): 2dp bar along the bottom, inset from corners.
         if focused {
-            let bar_h    = s(2);
+            let bar_h     = s(2);
             let bar_inset = s(4);
-            let bar_rc   = RECT {
+            let bar_rc    = RECT {
                 left:   rc.left  + bar_inset,
                 top:    rc.bottom - bar_h,
                 right:  rc.right - bar_inset,
@@ -527,14 +494,12 @@ mod draw {
             DeleteObject(accent_br);
         }
 
-        // ── Text ──────────────────────────────────────────────────────────────
+        // Text
         let mut buf = [0u16; 256];
         let len = GetWindowTextW(di.hwndItem, &mut buf) as usize;
-
         let is_none = len == 0 || String::from_utf16_lossy(&buf[..len]) == "None";
 
         SetBkMode(hdc, TRANSPARENT);
-
         let pad_l = s(10);
         let pad_r = s(6);
 
@@ -551,7 +516,7 @@ mod draw {
             DrawTextW(hdc, &mut none_text[..none_text.len()-1].to_vec(), &mut rc_text,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         } else {
-            // Bound key combo — always light grey; accent tint when focused
+            // Bound combo: light grey normally, accent tint when focused.
             let text_color = if focused { accent } else { COLORREF(0x00CCCCCC) };
             SetTextColor(hdc, text_color);
             let mut rc_text = RECT { left: rc.left + pad_l, top: rc.top, right: rc.right - pad_r, bottom: rc.bottom };
@@ -565,17 +530,17 @@ mod draw {
 
 pub struct HotkeyRow {
     pub h_lbl:   HWND,
-    /// Owner-drawn pill button (replaces the old edit control).
+    /// Owner-drawn pill button.
     pub h_edit:  HWND,
     pub h_clear: HWND,
     pub ini_key: &'static str,
     pub clr_id:  usize,
-    /// Control ID of the pill (needed for EN_CHANGE matching in app.rs).
+    /// Control ID of the pill (for EN_CHANGE matching in app.rs).
     #[allow(dead_code)]
     pub edit_id: usize,
 }
 
-// ── HotkeysTab ─────────────────────────────────────────────────────────────────
+// ── HotkeysTab ────────────────────────────────────────────────────────────────
 
 pub struct HotkeysTab {
     pub h_lbl_title:       HWND,
@@ -585,7 +550,7 @@ pub struct HotkeysTab {
     #[allow(dead_code)]
     pub h_lbl_sect_system: HWND,
     pub h_sep_sect: [HWND; 3],
-    pub rows: [HotkeyRow; 8],
+    pub rows: [HotkeyRow; 6],
     pub h_sep_bottom: HWND,
     pub group: ControlGroup,
 }
@@ -606,12 +571,12 @@ impl HotkeysTab {
         SendMessageW(h_lbl_title, WM_SETFONT, WPARAM(font_title.0 as usize), LPARAM(1));
 
         let h_lbl_desc = cb.static_text(
-    w!(
-        "Click a field then press a key combination. Esc or Delete to clear.\r\n\
-         Supported modifiers: Win, Ctrl, Alt, Shift."
-    ),
-    SS_NOPREFIX,
-);
+            w!(
+                "Click a field then press a key combination. Esc or Delete to clear.\r\n\
+                 Supported modifiers: Win, Ctrl, Alt, Shift."
+            ),
+            SS_NOPREFIX,
+        );
 
         let h_lbl_sect_dimmer = cb.static_text(w!("Taskbar Dimmer"), SS_NOPREFIX);
         let h_sep_sect0       = cb.static_text(w!(""), SS_BLACKRECT);
@@ -620,13 +585,11 @@ impl HotkeysTab {
         let h_lbl_sect_system = cb.static_text(w!("System"), SS_NOPREFIX);
         let h_sep_sect2       = cb.static_text(w!(""), SS_BLACKRECT);
 
-        // Section headings: 11pt bold — smaller than the 16pt tab title but
-        // still distinct from the 10pt normal row labels.
+        // Section headings: 11pt bold
         let font_sect = crate::ui_drawing::make_font_cached(w!("Segoe UI"), 11, dpi, true);
         SendMessageW(h_lbl_sect_dimmer, WM_SETFONT, WPARAM(font_sect.0 as usize), LPARAM(1));
         SendMessageW(h_lbl_sect_crush,  WM_SETFONT, WPARAM(font_sect.0 as usize), LPARAM(1));
         SendMessageW(h_lbl_sect_system, WM_SETFONT, WPARAM(font_sect.0 as usize), LPARAM(1));
-
 
         let make_row = |lbl_text: PCWSTR,
                         id_edit: usize, id_clear: usize,
@@ -649,13 +612,8 @@ impl HotkeysTab {
             IDC_HK_EDT_INCREASE,      IDC_HK_CLR_INCREASE,       "IncreaseBlackCrush");
         let row4 = make_row(w!("Toggle Taskbar Dimmer"),
             IDC_HK_EDT_TOGGLE_DIMMER, IDC_HK_CLR_TOGGLE_DIMMER, "ToggleTaskbarDimmer");
-        let row5 = make_row(w!("Decrease Dim Level"),
-            IDC_HK_EDT_DIM_DECREASE,  IDC_HK_CLR_DIM_DECREASE,  "DecreaseDimLevel");
-        let row6 = make_row(w!("Increase Dim Level"),
-            IDC_HK_EDT_DIM_INCREASE,  IDC_HK_CLR_DIM_INCREASE,  "IncreaseDimLevel");
-
         let row7 = make_row(w!("Toggle HDR/SDR"),
-            IDC_HK_EDT_TOGGLE_HDR, IDC_HK_CLR_TOGGLE_HDR, "ToggleHDR");
+            IDC_HK_EDT_TOGGLE_HDR,    IDC_HK_CLR_TOGGLE_HDR,    "ToggleHDR");
 
         let h_sep_bottom = cb.static_text(w!(""), SS_BLACKRECT);
 
@@ -668,8 +626,6 @@ impl HotkeysTab {
             row3.h_lbl, row3.h_edit, row3.h_clear,
             h_lbl_sect_dimmer, h_sep_sect1,
             row4.h_lbl, row4.h_edit, row4.h_clear,
-            row5.h_lbl, row5.h_edit, row5.h_clear,
-            row6.h_lbl, row6.h_edit, row6.h_clear,
             h_lbl_sect_system, h_sep_sect2,
             row7.h_lbl, row7.h_edit, row7.h_clear,
             h_sep_bottom,
@@ -679,7 +635,7 @@ impl HotkeysTab {
             h_lbl_title, h_lbl_desc,
             h_lbl_sect_dimmer, h_lbl_sect_crush, h_lbl_sect_system,
             h_sep_sect: [h_sep_sect0, h_sep_sect1, h_sep_sect2],
-            rows: [row0, row1, row2, row3, row4, row5, row6, row7],
+            rows: [row0, row1, row2, row3, row4, row7],
             h_sep_bottom,
             group,
         }
@@ -702,15 +658,14 @@ impl HotkeysTab {
                 let ws: Vec<u16> = "None".encode_utf16().chain([0]).collect();
                 SetWindowTextW(row.h_edit, PCWSTR(ws.as_ptr()));
                 InvalidateRect(row.h_edit, None, false);
-                // Notify parent so the cleared binding is auto-saved immediately,
-                // consistent with key-capture behaviour.
+                // Auto-save immediately, consistent with key-capture behaviour.
                 notify_parent_changed(row.h_edit);
                 break;
             }
         }
     }
 
-    /// Return true if `hwnd` is one of the hotkey pill buttons.
+    /// Returns true if `hwnd` is one of the hotkey pill buttons.
     pub fn is_pill(&self, hwnd: HWND) -> bool {
         self.rows.iter().any(|r| r.h_edit == hwnd)
     }
@@ -718,12 +673,10 @@ impl HotkeysTab {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     unsafe fn make_pill_button(cb: &ControlBuilder, id: usize, initial: &str) -> HWND {
-        // Create as owner-drawn button so WM_DRAWITEM paints it.
-        let h = cb.button(PCWSTR(std::ptr::null()), id); // text set below via SetWindowText
-
+        // Owner-drawn button — WM_DRAWITEM paints it; text set below.
+        let h = cb.button(PCWSTR(std::ptr::null()), id);
         let ws: Vec<u16> = initial.encode_utf16().chain([0]).collect();
         SetWindowTextW(h, PCWSTR(ws.as_ptr()));
-
         // Install key-capture subclass.
         let proc_ptr: isize = mem::transmute(
             hotkey_pill_subclass_proc

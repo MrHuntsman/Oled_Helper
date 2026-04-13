@@ -35,8 +35,7 @@ use windows::{
     },
 };
 
-// CreateMutexW is not re-exported by windows-rs 0.58's Threading bindings,
-// so we declare it directly — same pattern used for SetDeviceGammaRamp.
+// CreateMutexW is not re-exported by windows-rs 0.58 Threading bindings.
 #[link(name = "kernel32")]
 extern "system" {
     fn CreateMutexW(
@@ -47,25 +46,17 @@ extern "system" {
 }
 
 fn ini_path() -> PathBuf {
-    let mut dir = PathBuf::from(
-        env::var("APPDATA").unwrap_or_else(|_| ".".into()),
-    );
+    let mut dir = PathBuf::from(env::var("APPDATA").unwrap_or_else(|_| ".".into()));
     dir.push("OledHelper");
     std::fs::create_dir_all(&dir).ok();
     dir.push("OledHelper.ini");
     dir
 }
 
-/// Strips the `\\?\` extended-length path prefix added by `current_exe()` on
-/// Windows.  `std::process::Command` (CreateProcess) does not accept `\\?\`
-/// paths, so the prefix must be removed before spawning a child process.
+/// Strips the `\\?\` prefix added by `current_exe()` — CreateProcess doesn't accept it.
 fn strip_unc_prefix(path: PathBuf) -> PathBuf {
     let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix(r"\\?\") {
-        PathBuf::from(stripped)
-    } else {
-        path
-    }
+    if let Some(stripped) = s.strip_prefix(r"\\?\") { PathBuf::from(stripped) } else { path }
 }
 
 fn main() {
@@ -73,20 +64,13 @@ fn main() {
 }
 
 unsafe fn run_app() {
-    // ── DPI awareness — belt-and-suspenders alongside the manifest ────────────
-    // The manifest embedded by build.rs declares PerMonitorV2, but some execution
-    // contexts (debuggers, certain launchers) don't honour it.  Calling this API
-    // first ensures we always get crisp per-monitor scaling regardless.
-    // It is a no-op if the manifest already set PerMonitorV2.
+    // Belt-and-suspenders alongside the manifest: ensures PerMonitorV2 even in
+    // debuggers/launchers that don't honour it. No-op if manifest already set it.
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    // ── Single-instance guard (named kernel mutex) ────────────────────────────
-    // CreateMutexW with bInitialOwner=TRUE succeeds for the first instance and
-    // sets ERROR_ALREADY_EXISTS for every subsequent one.  The handle is held
-    // in `_mutex` for the lifetime of run_app; Windows releases it automatically
-    // when the process exits or the handle drops.
-    let mutex_name: Vec<u16> = "Global\\OledHelperSingleInstanceMutex\0"
-        .encode_utf16().collect();
+    // ── Single-instance guard ─────────────────────────────────────────────────
+    // bInitialOwner=1: first instance succeeds, subsequent ones get ERROR_ALREADY_EXISTS.
+    let mutex_name: Vec<u16> = "Global\\OledHelperSingleInstanceMutex\0".encode_utf16().collect();
     let mutex_handle = CreateMutexW(ptr::null_mut(), 1, mutex_name.as_ptr());
     if mutex_handle.0.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
         MessageBoxW(
@@ -97,10 +81,7 @@ unsafe fn run_app() {
         );
         return;
     }
-    // Wrap the raw HANDLE in a newtype whose Drop calls CloseHandle.
-    // HANDLE is Copy, so a bare `let _mutex = mutex_handle` followed by
-    // `drop(_mutex)` is a no-op — the kernel object would never be released
-    // until the process exits.  OwnedHandle guarantees release on drop.
+    // OwnedHandle ensures CloseHandle on drop (bare HANDLE is Copy, so drop is a no-op).
     struct OwnedHandle(HANDLE);
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
@@ -111,58 +92,40 @@ unsafe fn run_app() {
     }
     let _mutex = OwnedHandle(mutex_handle);
 
-    // ── Panic hook: reset gamma ramp on unexpected crash ──────────────────────
+    // Reset gamma on panic
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         gamma_ramp::reset_display_ramp();
         default_hook(info);
     }));
 
-    // ── Run the main window ───────────────────────────────────────────────────
+    // ── Run ───────────────────────────────────────────────────────────────────
     if let Err(e) = app::run(ini_path()) {
         gamma_ramp::reset_display_ramp();
         let msg: Vec<u16> = format!("Fatal error: {e}\0").encode_utf16().collect();
-        MessageBoxW(
-            HWND(ptr::null_mut()),
-            PCWSTR(msg.as_ptr()),
-            w!("OledHelper Error"),
-            MB_OK | MB_ICONERROR,
-        );
+        MessageBoxW(HWND(ptr::null_mut()), PCWSTR(msg.as_ptr()), w!("OledHelper Error"), MB_OK | MB_ICONERROR);
     }
 
     gamma_ramp::reset_display_ramp();
 
-    // Capture flags before _mutex drops (reads are safe here), but all
-    // spawning happens after the drop so the new instance can acquire the mutex.
+    // Capture flags before _mutex drops; all spawning happens after the drop
+    // so the new instance can acquire the mutex.
     let should_restart = app::RESTART_ON_EXIT.load(std::sync::atomic::Ordering::SeqCst);
-    let update_path = app::UPDATE_RELAUNCH_PATH.lock().ok()
-        .and_then(|mut g| g.take());
-    let old_exe_path = app::OLD_EXE_PATH.lock().ok()
-        .and_then(|mut g| g.take());
+    let update_path    = app::UPDATE_RELAUNCH_PATH.lock().ok().and_then(|mut g| g.take());
+    let old_exe_path   = app::OLD_EXE_PATH.lock().ok().and_then(|mut g| g.take());
 
-    // Drop the mutex explicitly here — before any spawn — so the new instance
-    // can acquire it successfully.  Without this explicit drop, _mutex lives
-    // until the closing brace of run_app(), which is after the spawn() calls,
-    // causing the new process to see ERROR_ALREADY_EXISTS and show the
-    // "already running" message box.
+    // Explicit drop before spawn — without this, the new process sees ERROR_ALREADY_EXISTS.
     drop(_mutex);
 
     if should_restart {
-        // Tray "Restart" — relaunch the current exe.
-        // current_exe() returns a \\?\ path on Windows; strip it so CreateProcess works.
         if let Ok(exe) = std::env::current_exe() {
-            let exe = strip_unc_prefix(exe);
-            let _ = std::process::Command::new(exe).spawn();
+            let _ = std::process::Command::new(strip_unc_prefix(exe)).spawn();
         }
     } else if let Some(path) = update_path {
-        // Self-update — launch the newly-installed exe.
         let _ = std::process::Command::new(&path).spawn();
 
-        // Delete OledHelper_old.exe now that the mutex is released and the
-        // new process has been spawned.  This process is about to exit, so
-        // Windows will release the exe image section handle momentarily,
-        // allowing the delete to succeed.  We retry briefly in a background
-        // thread and sleep to let it finish before the process exits.
+        // Delete OledHelper_old.exe after releasing the exe image section handle.
+        // Retry briefly in a background thread; sleep before exit to let it finish.
         if let Some(old_path) = old_exe_path {
             std::thread::spawn(move || {
                 let p = std::path::Path::new(&old_path);
@@ -172,7 +135,6 @@ unsafe fn run_app() {
                 }
                 let _ = std::fs::remove_file(p);
             });
-            // Give the background thread a moment to finish before we exit.
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }

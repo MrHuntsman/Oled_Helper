@@ -1,18 +1,17 @@
-// win32.rs — Thin safe wrappers around the Win32 patterns used throughout app.rs.
+// win32.rs — Thin safe wrappers around Win32 patterns used throughout app.rs.
 //
 // Goals:
 //   · Keep all raw pointer manipulation in one place.
-//   · Let business-logic functions stay free of `unsafe` blocks for the common cases.
-//   · Every function is either safe or has a clearly-documented safety contract.
+//   · Let business-logic code stay free of `unsafe` blocks for common cases.
 
 #![allow(unused_must_use)]
 use windows::Win32::{
     Foundation::HWND,
-    Graphics::Gdi::{InvalidateRect, RedrawWindow, RDW_INVALIDATE, RDW_UPDATENOW, RDW_ERASE},
+    Graphics::Gdi::{InvalidateRect, RedrawWindow, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW},
     UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SetWindowLongPtrW,
         ShowWindow, SetWindowTextW,
-        GWLP_USERDATA, SW_SHOW, SW_HIDE,
+        GWLP_USERDATA, SW_HIDE, SW_SHOW,
     },
     UI::Input::KeyboardAndMouse::{
         EnableWindow,
@@ -25,47 +24,33 @@ use windows::core::PCWSTR;
 
 // ── ControlGroup ──────────────────────────────────────────────────────────────
 //
-// Owns a set of logically related HWNDs (e.g. a slider + its label + its value
-// display) and lets callers act on all of them in one call.  This eliminates
-// the scattered per-handle `set_visible` loops that were the source of
-// mismatched-visibility bugs when toggling whole UI sections.
+// Owns a set of related HWNDs (e.g. a slider + label + value display) and lets
+// callers act on all of them in one call, preventing mismatched-visibility bugs.
 //
-// Usage:
 //   let g = ControlGroup::new(vec![h_slider, h_label, h_value]);
-//   g.show();
-//   g.hide();
-//   g.set_enabled(false);
+//   g.show();  g.hide();  g.set_enabled(false);
 
 pub struct ControlGroup {
     handles: Vec<HWND>,
 }
 
 impl ControlGroup {
-    /// Create a group from an explicit list of handles.
     pub fn new(handles: Vec<HWND>) -> Self {
         Self { handles }
     }
 
-    /// Make every handle in the group visible.
     pub fn show(&self) {
-        for &h in &self.handles {
-            set_visible(h, true);
-        }
+        for &h in &self.handles { set_visible(h, true); }
     }
 
-    /// Hide every handle in the group.
     pub fn hide(&self) {
-        for &h in &self.handles {
-            set_visible(h, false);
-        }
+        for &h in &self.handles { set_visible(h, false); }
     }
 
-    /// Show or hide based on `visible`.
     pub fn set_visible(&self, visible: bool) {
         if visible { self.show() } else { self.hide() }
     }
 
-    /// Enable or disable every handle in the group.
     #[allow(dead_code)]
     pub fn set_enabled(&self, enabled: bool) {
         for &h in &self.handles {
@@ -73,20 +58,17 @@ impl ControlGroup {
         }
     }
 
-    /// Invalidate (schedule repaint) every handle in the group.
     #[allow(dead_code)]
     pub fn invalidate_all(&self) {
-        for &h in &self.handles {
-            invalidate(h);
-        }
+        for &h in &self.handles { invalidate(h); }
     }
 }
 
 // ── State-pointer helpers ─────────────────────────────────────────────────────
 //
 // The main window stores its `AppState` as a raw pointer in GWLP_USERDATA so
-// that the `extern "system"` WndProc can reach it.  These two functions are the
-// only places in the codebase that touch that raw pointer.
+// the `extern "system"` WndProc can reach it. These are the only places that
+// touch that pointer.
 
 /// Store `state` in `hwnd`'s GWLP_USERDATA slot, taking ownership of the Box.
 ///
@@ -96,23 +78,21 @@ pub unsafe fn attach_state<T>(hwnd: HWND, state: Box<T>) {
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
 }
 
-/// Borrow the `AppState` stored in GWLP_USERDATA, if any.
-///
-/// Returns `None` when the slot is zero (before `attach_state` or after
-/// `detach_state`).
+/// Borrow the `AppState` from GWLP_USERDATA. Returns `None` when the slot is
+/// zero (before `attach_state` or after `detach_state`).
 ///
 /// # Safety
-/// The pointer in GWLP_USERDATA must have been placed there by `attach_state<T>`
-/// and must not yet have been freed by `detach_state<T>`.
+/// The pointer must have been placed there by `attach_state<T>` and not yet
+/// freed by `detach_state<T>`.
 pub unsafe fn borrow_state<T>(hwnd: HWND) -> Option<&'static mut T> {
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut T;
     if ptr.is_null() { None } else { Some(&mut *ptr) }
 }
 
-/// Reclaim and drop the `AppState` stored in GWLP_USERDATA, then zero the slot.
+/// Reclaim and drop the `AppState` from GWLP_USERDATA, then zero the slot.
 ///
 /// # Safety
-/// Same contract as `borrow_state`.  Must be called at most once per window.
+/// Same contract as `borrow_state`. Must be called at most once per window.
 pub unsafe fn detach_state<T>(hwnd: HWND) {
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut T;
     if !ptr.is_null() {
@@ -123,21 +103,16 @@ pub unsafe fn detach_state<T>(hwnd: HWND) {
 
 // ── Text helpers ──────────────────────────────────────────────────────────────
 
-/// Set the text of a Win32 control from a Rust `&str`.
-///
-/// Encodes to UTF-16 and calls `SetWindowTextW`.  This is safe to call from
-/// any thread that owns the window (same thread that created it).
+/// Set a Win32 control's text from a `&str` (encodes to UTF-16).
 ///
 /// # Safety
-/// `hwnd` must be a valid child window.
+/// `hwnd` must be a valid child window on the calling thread.
 pub unsafe fn set_text(hwnd: HWND, text: &str) {
     let w: Vec<u16> = text.encode_utf16().chain([0]).collect();
     SetWindowTextW(hwnd, PCWSTR(w.as_ptr()));
 }
 
-/// Format a value and set it as the text of a Win32 control.
-///
-/// Convenience wrapper around `set_text` for numeric/formatted labels.
+/// Format a value and set it as a control's text.
 ///
 /// # Safety
 /// Same as `set_text`.
@@ -145,27 +120,26 @@ pub unsafe fn set_text_fmt(hwnd: HWND, args: std::fmt::Arguments<'_>) {
     set_text(hwnd, &args.to_string());
 }
 
-// ── Visibility / enable helpers ───────────────────────────────────────────────
+// ── Visibility / repaint helpers ──────────────────────────────────────────────
 
 /// Show or hide a control.
 pub fn set_visible(hwnd: HWND, visible: bool) {
-    // ShowWindow is safe for any valid HWND (it does not dereference user pointers).
     unsafe { ShowWindow(hwnd, if visible { SW_SHOW } else { SW_HIDE }); }
 }
 
-/// Invalidate a control so it repaints on the next WM_PAINT.
+/// Schedule a repaint on the next WM_PAINT.
 pub fn invalidate(hwnd: HWND) {
     unsafe { InvalidateRect(hwnd, None, false); }
 }
 
-/// Invalidate and immediately force a repaint (equivalent to `RedrawWindow`
-/// with `RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE`).
+/// Invalidate and immediately force a repaint.
 pub fn redraw_now(hwnd: HWND) {
     unsafe { RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE); }
 }
-// ── HDR toggle via Win+Alt+B shortcut ────────────────────────────────────────
 
-/// Simulates Win+Alt+B to toggle Windows HDR on the current display.
+// ── HDR toggle ────────────────────────────────────────────────────────────────
+
+/// Simulate Win+Alt+B to toggle Windows HDR on the current display.
 pub unsafe fn toggle_hdr_via_shortcut() {
     let inputs: [INPUT; 6] = [
         INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT {

@@ -1,13 +1,13 @@
-// gamma_ramp.rs
-//
-// Builds 256-entry 16-bit gamma ramps using a Reinhard-based shadow-recovery curve.
+// gamma_ramp.rs — 256-entry 16-bit gamma ramps using a Reinhard-based shadow-recovery curve.
 // Pure black (index 0) is always left untouched.
 
 use windows::Win32::Graphics::Gdi::{GetDC, HDC, ReleaseDC};
 use windows::Win32::Foundation::HWND;
 use std::ptr;
 
-/// 256-entry 16-bit RGB gamma ramp, matching the GDI RAMP layout.
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/// 256-entry 16-bit RGB gamma ramp matching the GDI RAMP layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GammaRamp {
@@ -22,51 +22,46 @@ impl GammaRamp {
     }
 }
 
-// Declare SetDeviceGammaRamp directly — windows-rs exposes it as taking *mut c_void
-// which requires a manual extern block to use our typed GammaRamp struct.
+// Manual extern block — windows-rs exposes SetDeviceGammaRamp as *mut c_void,
+// so we redeclare it with our typed struct.
 #[link(name = "gdi32")]
 extern "system" {
     pub fn SetDeviceGammaRamp(hdc: HDC, lpramp: *const GammaRamp) -> i32;
     pub fn GetDeviceGammaRamp(hdc: HDC, lpramp: *mut GammaRamp) -> i32;
 }
 
-/// Reads the current system gamma ramp for the primary display.
-pub unsafe fn get_display_ramp() -> Option<GammaRamp> {
-    let ramp = GammaRamp::zeroed();
-    let null_hwnd = HWND(ptr::null_mut());
-    let hdc = GetDC(null_hwnd);
-    if hdc.0.is_null() {
-        return None;
-    }
-    let mut ramp = ramp;
-    let ok = GetDeviceGammaRamp(hdc, &mut ramp);
-    ReleaseDC(null_hwnd, hdc);
-    if ok != 0 {
-        Some(ramp)
-    } else {
-        None
-    }
-}
+// ── Ramp builders ─────────────────────────────────────────────────────────────
 
-/// Returns a corrected ramp that lifts near-black tones by `black_lift` (0–20).
+/// Lifted or crushed ramp using the same Reinhard curve in both directions.
+/// - Positive `black_lift` (1–15): raises near-black tones above linear.
+/// - Zero: linear passthrough.
+/// - Negative `black_lift` (-1 to -15): pulls near-black tones the same distance below linear.
+/// Pure black (index 0) is always left untouched.
 pub fn build_ramp(black_lift: i32) -> GammaRamp {
     let mut ramp = GammaRamp::zeroed();
     for i in 0usize..256 {
-        let lifted: f64 = if i > 0 {
-            let t     = i as f64 / 255.0;
-            let blend = (1.0 - t) / (1.0 + t * 2.0);
-            let floor = (black_lift as f64 / 255.0) * blend;
-            (floor + t * (1.0 - floor)).clamp(0.0, 1.0)
-        } else {
+        let out: f64 = if i == 0 {
             0.0
+        } else {
+            let t      = i as f64 / 255.0;
+            let abs_bl = black_lift.unsigned_abs() as i32;
+            let blend  = (1.0 - t) / (1.0 + t * 2.0);
+            let floor  = (abs_bl as f64 / 255.0) * blend;
+            let lifted = floor + t * (1.0 - floor);
+            if black_lift >= 0 {
+                lifted.clamp(0.0, 1.0)
+            } else {
+                // Mirror: reflect the lift delta below linear
+                (2.0 * t - lifted).clamp(0.0, 1.0)
+            }
         };
-        let v = (lifted * 65535.0).round() as u16;
+        let v = (out * 65535.0).round() as u16;
         ramp.red[i] = v; ramp.green[i] = v; ramp.blue[i] = v;
     }
     ramp
 }
 
-/// Neutral linear ramp — no correction applied.
+/// Linear ramp — no correction.
 pub fn build_linear_ramp() -> GammaRamp {
     let mut ramp = GammaRamp::zeroed();
     for i in 0usize..256 {
@@ -74,6 +69,19 @@ pub fn build_linear_ramp() -> GammaRamp {
         ramp.red[i] = v; ramp.green[i] = v; ramp.blue[i] = v;
     }
     ramp
+}
+
+// ── Display I/O ───────────────────────────────────────────────────────────────
+
+/// Reads the current system gamma ramp from the primary display.
+pub unsafe fn get_display_ramp() -> Option<GammaRamp> {
+    let null_hwnd = HWND(ptr::null_mut());
+    let hdc = GetDC(null_hwnd);
+    if hdc.0.is_null() { return None; }
+    let mut ramp = GammaRamp::zeroed();
+    let ok = GetDeviceGammaRamp(hdc, &mut ramp);
+    ReleaseDC(null_hwnd, hdc);
+    if ok != 0 { Some(ramp) } else { None }
 }
 
 /// Applies a linear ramp to the primary display — used on exit/crash.

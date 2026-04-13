@@ -1,12 +1,7 @@
-// nav_icons.rs — compile-time PNG embedding for nav button icons.
+// nav_icons.rs — compile-time PNG embedding for nav and tab header icons.
 //
-// Drop PNG files into assets/icons/ next to Cargo.toml:
-//   assets/icons/tab_crush.png
-//   assets/icons/tab_dimmer.png
-//   assets/icons/tab_hotkeys.png
-//   assets/icons/tab_debug.png
-//
-// To disable an icon temporarily, replace include_bytes!(...) with b"".
+// Drop PNGs into assets/icons/ next to Cargo.toml.
+// Set any include_bytes!(...) to b"" to fall back to the built-in glyph.
 // Call NavIcons::load(dpi) once at startup; pass each HBITMAP to draw_nav_item.
 
 #![allow(non_snake_case)]
@@ -19,37 +14,36 @@ use windows::Win32::{
 };
 
 // ── Embedded PNG bytes ────────────────────────────────────────────────────────
-// Replace include_bytes!(...) with b"" to fall back to the built-in glyph icon.
 
-const BYTES_CRUSH:   &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_crush.png"));
-const BYTES_DIMMER:  &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_dimmer.png"));
-const BYTES_SYSTEM:  &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_system.png"));
-const BYTES_HOTKEYS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_hotkeys.png"));
-const BYTES_DEBUG:   &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_debug.png"));
-const BYTES_ABOUT:   &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_about.png"));
+const BYTES_CRUSH:    &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_crush.png"));
+const BYTES_DIMMER:   &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_dimmer.png"));
+const BYTES_SYSTEM:   &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_system.png"));
+const BYTES_HOTKEYS:  &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_hotkeys.png"));
+const BYTES_DEBUG:    &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_debug.png"));
+const BYTES_ABOUT:    &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tab_about.png"));
 const BYTES_ZOOM:     &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/zoom.png"));
 const BYTES_ZOOM_OUT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/zoom_out.png"));
 
-// ── NavIcons ──────────────────────────────────────────────────────────────────
+// ── NavIcons — sidebar nav buttons ───────────────────────────────────────────
 
 pub struct NavIcons {
-    pub crush:   Option<HBITMAP>,
-    pub dimmer:  Option<HBITMAP>,
-    pub system:  Option<HBITMAP>,
-    pub hotkeys: Option<HBITMAP>,
-    pub debug:   Option<HBITMAP>,
-    pub about:   Option<HBITMAP>,
+    pub crush:    Option<HBITMAP>,
+    pub dimmer:   Option<HBITMAP>,
+    pub system:   Option<HBITMAP>,
+    pub hotkeys:  Option<HBITMAP>,
+    pub debug:    Option<HBITMAP>,
+    pub about:    Option<HBITMAP>,
     pub zoom:     Option<HBITMAP>,
     pub zoom_out: Option<HBITMAP>,
 }
 
 impl NavIcons {
-    /// Decode all embedded PNGs and scale them to the DPI-correct icon size.
+    /// Decode all embedded PNGs scaled to the DPI-correct icon size.
     /// Call once after the main window is created.
     pub unsafe fn load(dpi: u32) -> Self {
         let icon_px = (16 * dpi / 96).max(16);
-        // Zoom icons sit in an 18×20 logical-px cell; draw size = min(18,20) = 18.
-        // Scale to exactly that so AlphaBlend never has to stretch them.
+        // Zoom icons live in an 18×20 logical-px cell; draw at 18 so
+        // AlphaBlend never has to stretch them.
         let zoom_px = (18 * dpi / 96).max(18);
         Self {
             crush:    decode_png(BYTES_CRUSH,    icon_px),
@@ -65,7 +59,8 @@ impl NavIcons {
 
     /// Delete all GDI bitmaps. Call on WM_DESTROY.
     pub unsafe fn destroy(&self) {
-        for bmp in [self.crush, self.dimmer, self.system, self.hotkeys, self.debug, self.about, self.zoom, self.zoom_out]
+        for bmp in [self.crush, self.dimmer, self.system, self.hotkeys,
+                    self.debug, self.about, self.zoom, self.zoom_out]
             .iter().flatten()
         {
             let _ = DeleteObject(*bmp);
@@ -73,7 +68,7 @@ impl NavIcons {
     }
 }
 
-// ── Tab header icons (32 logical px — shown beside each tab's title) ──────────
+// ── TabHeaderIcons — 20 px icons beside each tab title ───────────────────────
 
 pub struct TabHeaderIcons {
     pub crush:   Option<HBITMAP>,
@@ -98,7 +93,8 @@ impl TabHeaderIcons {
     }
 
     pub unsafe fn destroy(&self) {
-        for bmp in [self.crush, self.dimmer, self.system, self.hotkeys, self.debug, self.about]
+        for bmp in [self.crush, self.dimmer, self.system,
+                    self.hotkeys, self.debug, self.about]
             .iter().flatten()
         {
             let _ = DeleteObject(*bmp);
@@ -108,8 +104,8 @@ impl TabHeaderIcons {
 
 // ── PNG → pre-multiplied HBITMAP ─────────────────────────────────────────────
 
-/// Decode a PNG from `bytes`, Lanczos-3 downscale to `size×size`, and return
-/// a 32-bpp pre-multiplied-alpha HBITMAP ready for `AlphaBlend`.
+/// Decode `bytes`, Lanczos-3 downscale to `size×size`, return a 32-bpp
+/// pre-multiplied-alpha HBITMAP ready for `AlphaBlend`.
 /// Returns `None` if `bytes` is empty or decoding fails.
 unsafe fn decode_png(bytes: &[u8], size: u32) -> Option<HBITMAP> {
     if bytes.is_empty() { return None; }
@@ -141,7 +137,7 @@ unsafe fn decode_png(bytes: &[u8], size: u32) -> Option<HBITMAP> {
         _ => return None,
     };
 
-    // Lanczos-3 downscale to `size × size` — separable horizontal then vertical pass.
+    // Lanczos-3 downscale — separable horizontal then vertical pass.
     fn sinc(x: f32) -> f32 {
         if x.abs() < 1e-6 { return 1.0; }
         let px = std::f32::consts::PI * x;
@@ -220,7 +216,7 @@ unsafe fn decode_png(bytes: &[u8], size: u32) -> Option<HBITMAP> {
         bgra[i * 4 + 3] = a as u8;
     }
 
-    // Build a top-down 32-bpp DIB section and copy pixels in.
+    // Build a top-down 32-bpp DIB and copy pixels in.
     let hdc_screen = GetDC(HWND(ptr::null_mut()));
     let hdc_mem    = CreateCompatibleDC(hdc_screen);
     ReleaseDC(HWND(ptr::null_mut()), hdc_screen);

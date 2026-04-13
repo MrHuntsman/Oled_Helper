@@ -1,8 +1,5 @@
-// hotkeys.rs — Hotkey IDs, parse_hotkey, RegisterHotKey wrappers,
+// hotkeys.rs — hotkey IDs, parse_hotkey, RegisterHotKey wrappers,
 //              hold-to-compare keyboard hook, and WH_MOUSE_LL mouse-button hook.
-//
-// Everything in this file is pure hotkey/hook mechanics — no window layout,
-// no UI state, no INI management beyond reading the key strings.
 
 #![allow(non_snake_case, unused_must_use)]
 
@@ -27,24 +24,20 @@ use windows::Win32::{
 
 use crate::constants::WM_COMPARE_END;
 
-// ── Hotkey IDs (wparam value in WM_HOTKEY) ────────────────────────────────────
+// ── Hotkey IDs (WM_HOTKEY wparam) ────────────────────────────────────────────
 
 pub const HK_TOGGLE_DIM:   usize = 1;
 pub const HK_TOGGLE_CRUSH: usize = 2;
 pub const HK_HOLD_COMPARE: usize = 3;
 pub const HK_DECREASE:     usize = 4;
 pub const HK_INCREASE:     usize = 5;
-pub const HK_DIM_DECREASE: usize = 6;
-pub const HK_DIM_INCREASE: usize = 7;
 pub const HK_TOGGLE_HDR:   usize = 8;
 
 // ── parse_hotkey ──────────────────────────────────────────────────────────────
 
-/// Parse a saved hotkey string like "Ctrl+Alt+F9" or "Mouse4" back into
-/// (modifiers, vk_or_sentinel).
-/// Returns None for "None", empty strings, or unrecognised key names.
-/// Mouse sentinels (MB_MIDDLE, MB_XBUTTON*) are returned with mods = 0;
-/// they must be routed to the WH_MOUSE_LL hook, not to RegisterHotKey.
+/// Parses "Ctrl+Alt+F9" / "Mouse4" → (modifiers, vk_or_sentinel).
+/// Returns None for "None", empty, or unrecognised keys.
+/// Mouse sentinels are returned with mods=0; route them to WH_MOUSE_LL, not RegisterHotKey.
 pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
     use crate::tab_hotkeys::{
         MB_MIDDLE,
@@ -55,8 +48,7 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
     };
     if s.is_empty() || s.eq_ignore_ascii_case("none") { return None; }
 
-    // Mouse buttons carry no keyboard modifiers — check them first before
-    // attempting to strip any prefix.
+    // Mouse buttons carry no modifiers — check before stripping any prefix.
     let mouse_sentinel: Option<u32> = match s {
         "MButton" => Some(MB_MIDDLE),
         "Mouse4"  => Some(MB_XBUTTON1),  "Mouse5"  => Some(MB_XBUTTON2),
@@ -69,9 +61,7 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
         "Mouse18" => Some(MB_XBUTTON15), "Mouse19" => Some(MB_XBUTTON16),
         _ => None,
     };
-    if let Some(s) = mouse_sentinel {
-        return Some((0, s));
-    }
+    if let Some(s) = mouse_sentinel { return Some((0, s)); }
 
     let mut mods: u32 = 0;
     let mut key_part = s;
@@ -83,9 +73,7 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
         else { break; }
     }
 
-    // Static sorted table of (name, VK code) pairs.
-    // Sorted by Rust's default str ordering (lexicographic byte order) so that
-    // binary_search_by_key works correctly.
+    // Sorted by lexicographic byte order for binary_search_by_key.
     static KEY_TABLE: &[(&str, u32)] = &[
         ("'",         0xDE),
         (",",         0xBC),
@@ -157,13 +145,8 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
 
 // ── register_hotkeys ──────────────────────────────────────────────────────────
 
-/// Unregister all app hotkeys, then re-register from the current INI values.
-/// Keyboard bindings go through RegisterHotKey; mouse bindings go through the
-/// WH_MOUSE_LL hook installed by ensure_mouse_hook_installed.
-///
-/// `ini` is the app's `ProfileManager`; `mouse_hotkeys` is the per-slot
-/// cache on `AppState` (passed out separately to avoid the private-field
-/// visibility issue).
+/// Unregisters all hotkeys then re-registers from INI values.
+/// Keyboard bindings → RegisterHotKey; mouse bindings → WH_MOUSE_LL hook.
 pub unsafe fn register_hotkeys(
     ini: &crate::profile_manager::ProfileManager,
     mouse_hotkeys: &mut [u32; 9],
@@ -171,13 +154,10 @@ pub unsafe fn register_hotkeys(
 ) {
     use crate::tab_hotkeys::is_mouse_sentinel;
 
-    // Unregister all keyboard hotkeys.
     for id in [HK_TOGGLE_DIM, HK_TOGGLE_CRUSH, HK_HOLD_COMPARE,
-               HK_DECREASE,   HK_INCREASE,      HK_DIM_DECREASE, HK_DIM_INCREASE,
-               HK_TOGGLE_HDR] {
+               HK_DECREASE,   HK_INCREASE,      HK_TOGGLE_HDR] {
         UnregisterHotKey(hwnd, id as i32);
     }
-    // Clear all mouse slots; we'll repopulate below.
     for slot in &MOUSE_HK_SLOTS { slot.store(0, Ordering::SeqCst); }
     *mouse_hotkeys = [0u32; 9];
 
@@ -188,8 +168,6 @@ pub unsafe fn register_hotkeys(
         (HK_HOLD_COMPARE, ini.read(sec, "HoldCompare",         "None")),
         (HK_DECREASE,     ini.read(sec, "DecreaseBlackCrush",  "None")),
         (HK_INCREASE,     ini.read(sec, "IncreaseBlackCrush",  "None")),
-        (HK_DIM_DECREASE, ini.read(sec, "DecreaseDimLevel",    "None")),
-        (HK_DIM_INCREASE, ini.read(sec, "IncreaseDimLevel",    "None")),
         (HK_TOGGLE_HDR,   ini.read(sec, "ToggleHDR",           "None")),
     ];
 
@@ -197,37 +175,26 @@ pub unsafe fn register_hotkeys(
     for (id, s) in &bindings {
         if let Some((mods, vk)) = parse_hotkey(s) {
             if is_mouse_sentinel(vk) {
-                // Route to the mouse hook.
                 mouse_hotkeys[*id] = vk;
                 set_mouse_hk_slot(*id, vk);
                 any_mouse = true;
             } else {
-                // Normal keyboard hotkey — MOD_NOREPEAT prevents action flooding.
-                RegisterHotKey(hwnd, *id as i32,
-                    HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk);
+                // MOD_NOREPEAT prevents action flooding on held key.
+                RegisterHotKey(hwnd, *id as i32, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk);
             }
         }
     }
 
-    if any_mouse {
-        ensure_mouse_hook_installed(hwnd);
-    } else {
-        // No mouse bindings — uninstall the hook to avoid unnecessary overhead.
-        uninstall_mouse_hook();
-    }
+    if any_mouse { ensure_mouse_hook_installed(hwnd); } else { uninstall_mouse_hook(); }
 }
 
-// ── Hold-to-compare keyboard hook ────────────────────────────────────────────
-// RegisterHotKey only fires on key-down. To end "hold to compare" on key-up
-// we install a low-level keyboard hook (WH_KEYBOARD_LL) just for the duration
-// of the compare, then remove it immediately on key-up.
+// ── Hold-to-compare keyboard hook (WH_KEYBOARD_LL) ───────────────────────────
+// RegisterHotKey only fires on key-down. We install a low-level keyboard hook
+// for the hold duration and remove it immediately on key-up.
 
-/// VK code of the key currently being held for compare (0 = none).
-static COMPARE_VK:   AtomicU32   = AtomicU32::new(0);
-/// HWND of the main window, stored so the hook proc can PostMessage to it.
-static COMPARE_HWND: AtomicIsize = AtomicIsize::new(0);
-/// Handle to the installed WH_KEYBOARD_LL hook (0 = not installed).
-static COMPARE_HOOK: AtomicIsize = AtomicIsize::new(0);
+static COMPARE_VK:   AtomicU32   = AtomicU32::new(0);   // VK being held (0 = none)
+static COMPARE_HWND: AtomicIsize = AtomicIsize::new(0);  // main window HWND
+static COMPARE_HOOK: AtomicIsize = AtomicIsize::new(0);  // hook handle (0 = not installed)
 
 pub unsafe fn install_compare_hook(hwnd: HWND, vk: u32) {
     COMPARE_VK.store(vk, Ordering::SeqCst);
@@ -239,26 +206,57 @@ pub unsafe fn install_compare_hook(hwnd: HWND, vk: u32) {
 
 pub unsafe fn uninstall_compare_hook() {
     let raw = COMPARE_HOOK.swap(0, Ordering::SeqCst);
-    if raw != 0 {
-        UnhookWindowsHookEx(HHOOK(raw as *mut _));
-    }
+    if raw != 0 { UnhookWindowsHookEx(HHOOK(raw as *mut _)); }
     COMPARE_VK.store(0, Ordering::SeqCst);
 }
 
-unsafe extern "system" fn compare_ll_hook_proc(
-    code: i32, wp: WPARAM, lp: LPARAM,
-) -> LRESULT {
+// ── Hold-to-repeat keyboard hook (WH_KEYBOARD_LL) ────────────────────────────
+// Installed when HK_INCREASE or HK_DECREASE fires. Posts WM_CRUSH_REPEAT_END
+// to the main window on key-up so the repeat timer can be killed cleanly.
+
+pub const WM_CRUSH_REPEAT_END: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 30;
+
+static REPEAT_VK:   AtomicU32   = AtomicU32::new(0);
+static REPEAT_HWND: AtomicIsize = AtomicIsize::new(0);
+static REPEAT_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+pub unsafe fn install_repeat_hook(hwnd: HWND, vk: u32) {
+    REPEAT_VK.store(vk, Ordering::SeqCst);
+    REPEAT_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+    let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(repeat_ll_hook_proc), None, 0)
+        .unwrap_or(HHOOK(std::ptr::null_mut()));
+    REPEAT_HOOK.store(hook.0 as isize, Ordering::SeqCst);
+}
+
+pub unsafe fn uninstall_repeat_hook() {
+    let raw = REPEAT_HOOK.swap(0, Ordering::SeqCst);
+    if raw != 0 { UnhookWindowsHookEx(HHOOK(raw as *mut _)); }
+    REPEAT_VK.store(0, Ordering::SeqCst);
+}
+
+unsafe extern "system" fn repeat_ll_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let info = &*(lp.0 as *const KBDLLHOOKSTRUCT);
+        let vk   = REPEAT_VK.load(Ordering::SeqCst);
+        if info.vkCode == vk && (wp.0 as u32 == WM_KEYUP || wp.0 as u32 == WM_SYSKEYUP) {
+            let hwnd_raw = REPEAT_HWND.load(Ordering::SeqCst);
+            if hwnd_raw != 0 {
+                PostMessageW(HWND(hwnd_raw as *mut _), WM_CRUSH_REPEAT_END, WPARAM(0), LPARAM(0));
+            }
+            uninstall_repeat_hook();
+        }
+    }
+    CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wp, lp)
+}
+
+unsafe extern "system" fn compare_ll_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code >= 0 {
         let info = &*(lp.0 as *const KBDLLHOOKSTRUCT);
         let vk   = COMPARE_VK.load(Ordering::SeqCst);
         if info.vkCode == vk && (wp.0 as u32 == WM_KEYUP || wp.0 as u32 == WM_SYSKEYUP) {
             let hwnd_raw = COMPARE_HWND.load(Ordering::SeqCst);
             if hwnd_raw != 0 {
-                PostMessageW(
-                    HWND(hwnd_raw as *mut _),
-                    WM_COMPARE_END,
-                    WPARAM(0), LPARAM(0),
-                );
+                PostMessageW(HWND(hwnd_raw as *mut _), WM_COMPARE_END, WPARAM(0), LPARAM(0));
             }
             uninstall_compare_hook();
         }
@@ -266,23 +264,15 @@ unsafe extern "system" fn compare_ll_hook_proc(
     CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wp, lp)
 }
 
-// ── Global mouse hook (WH_MOUSE_LL) for mouse-button hotkeys ─────────────────
-//
-// RegisterHotKey only accepts real VK codes (0x00–0xFF); mouse buttons cannot
-// be registered that way.  Instead we keep a permanent WH_MOUSE_LL hook while
-// any mouse-button binding is active, and dispatch the same HK_* actions that
-// WM_HOTKEY would normally trigger by posting WM_HOTKEY to the main window.
-//
-// The hook proc runs on the same thread as the message pump (low-level hooks
-// are always called inline on the installing thread), so PostMessageW is safe.
+// ── Mouse-button hotkeys (WH_MOUSE_LL) ───────────────────────────────────────
+// RegisterHotKey only accepts VK codes; mouse buttons must use a low-level hook.
+// When a bound button fires, we post WM_HOTKEY to the main window directly.
+// The hook runs on the installing thread (same as the message pump), so PostMessageW is safe.
 
-/// Handle to the installed WH_MOUSE_LL hook (0 = not installed).
-static MOUSE_HOOK:    AtomicIsize = AtomicIsize::new(0);
-/// HWND of the main window for PostMessageW inside the hook proc.
-static MOUSE_HK_HWND: AtomicIsize = AtomicIsize::new(0);
-/// Packed mouse-button bindings shared with the hook proc.
-/// Index = HK_* id (1–7); value = MB_* sentinel (0 = unbound).
-/// Each slot is an independent AtomicU64 encoding (id << 32) | sentinel.
+static MOUSE_HOOK:    AtomicIsize = AtomicIsize::new(0); // hook handle (0 = not installed)
+static MOUSE_HK_HWND: AtomicIsize = AtomicIsize::new(0); // main window HWND
+
+/// Packed bindings: index = HK_* id (1–7), value = (id << 32) | MB_* sentinel (0 = unbound).
 pub static MOUSE_HK_SLOTS: [std::sync::atomic::AtomicU64; 9] = [
     std::sync::atomic::AtomicU64::new(0),
     std::sync::atomic::AtomicU64::new(0),
@@ -295,14 +285,12 @@ pub static MOUSE_HK_SLOTS: [std::sync::atomic::AtomicU64; 9] = [
     std::sync::atomic::AtomicU64::new(0),
 ];
 
-/// Write a (hk_id, sentinel) pair into the shared slot array.
 pub fn set_mouse_hk_slot(hk_id: usize, sentinel: u32) {
     if hk_id < MOUSE_HK_SLOTS.len() {
         MOUSE_HK_SLOTS[hk_id].store(((hk_id as u64) << 32) | sentinel as u64, Ordering::SeqCst);
     }
 }
 
-/// Install the WH_MOUSE_LL hook if not already installed.
 pub unsafe fn ensure_mouse_hook_installed(hwnd: HWND) {
     if MOUSE_HOOK.load(Ordering::SeqCst) != 0 { return; }
     MOUSE_HK_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
@@ -311,19 +299,14 @@ pub unsafe fn ensure_mouse_hook_installed(hwnd: HWND) {
     MOUSE_HOOK.store(hook.0 as isize, Ordering::SeqCst);
 }
 
-/// Uninstall the WH_MOUSE_LL hook and clear all slots.
 pub unsafe fn uninstall_mouse_hook() {
     let raw = MOUSE_HOOK.swap(0, Ordering::SeqCst);
-    if raw != 0 {
-        UnhookWindowsHookEx(HHOOK(raw as *mut _));
-    }
+    if raw != 0 { UnhookWindowsHookEx(HHOOK(raw as *mut _)); }
     for slot in &MOUSE_HK_SLOTS { slot.store(0, Ordering::SeqCst); }
     MOUSE_HK_HWND.store(0, Ordering::SeqCst);
 }
 
-unsafe extern "system" fn mouse_ll_hook_proc(
-    code: i32, wp: WPARAM, lp: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn mouse_ll_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     use crate::tab_hotkeys::{MB_MIDDLE, xbutton_index_to_sentinel};
 
     if code >= 0 {
@@ -331,8 +314,7 @@ unsafe extern "system" fn mouse_ll_hook_proc(
             WM_MBUTTONDOWN => Some(MB_MIDDLE),
             WM_XBUTTONDOWN => {
                 let info = &*(lp.0 as *const MSLLHOOKSTRUCT);
-                // HIWORD of mouseData holds the 1-based XBUTTON index.
-                let idx = ((info.mouseData >> 16) & 0xFFFF) as u16;
+                let idx  = ((info.mouseData >> 16) & 0xFFFF) as u16; // HIWORD = 1-based XBUTTON index
                 xbutton_index_to_sentinel(idx)
             }
             _ => None,
@@ -346,14 +328,8 @@ unsafe extern "system" fn mouse_ll_hook_proc(
                     let stored_sentinel = (v & 0xFFFF_FFFF) as u32;
                     let hk_id           = (v >> 32) as usize;
                     if stored_sentinel != 0 && stored_sentinel == s {
-                        PostMessageW(
-                            HWND(hwnd_raw as *mut _),
-                            WM_HOTKEY,
-                            WPARAM(hk_id),
-                            LPARAM(0),
-                        );
-                        // Don't break — two actions could share the same button
-                        // (edge case, but harmless to support).
+                        PostMessageW(HWND(hwnd_raw as *mut _), WM_HOTKEY, WPARAM(hk_id), LPARAM(0));
+                        // No break — two actions can share the same button.
                     }
                 }
             }

@@ -1,10 +1,8 @@
-// startup.rs — Windows startup registry helpers (HKCU\...\Run).
-//
-// Using the registry Run key instead of a Startup-folder shortcut avoids the
-// Bearfoos.A!ml false-positive triggered by writing .lnk files into the
-// per-user Startup folder.
+// startup.rs — HKCU\...\Run registry helpers.
+// Uses the Run key rather than a Startup-folder shortcut to avoid the
+// Bearfoos.A!ml false-positive triggered by writing .lnk files.
 
-// ── advapi32 registry API ─────────────────────────────────────────────────────
+// ── advapi32 bindings ─────────────────────────────────────────────────────────
 
 #[link(name = "advapi32")]
 extern "system" {
@@ -35,7 +33,7 @@ extern "system" {
     fn RegCloseKey(h_key: isize) -> i32;
 }
 
-const HKCU:      isize = -2147483647isize; // 0x80000001 as isize
+const HKCU:      isize = -2147483647isize; // 0x80000001
 const KEY_READ:  u32   = 0x20019;
 const KEY_WRITE: u32   = 0x20006;
 const REG_SZ:    u32   = 1;
@@ -43,7 +41,7 @@ const REG_SZ:    u32   = 1;
 const RUN_KEY:    &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE_NAME: &str = "OledHelper";
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn reg_run_key_w(access: u32) -> Option<isize> {
     let sub: Vec<u16> = RUN_KEY.encode_utf16().chain([0]).collect();
@@ -58,7 +56,7 @@ fn value_name_w() -> Vec<u16> {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Returns `true` if the OledHelper run-key value exists in HKCU.
+/// Returns `true` if the OledHelper Run value exists in HKCU.
 pub fn startup_registry_exists() -> bool {
     let Some(hk) = reg_run_key_w(KEY_READ) else { return false };
     let name = value_name_w();
@@ -72,22 +70,17 @@ pub fn startup_registry_exists() -> bool {
     rc == 0
 }
 
-/// Returns `true` when the process was launched with `--minimized`
-/// (i.e. by the Windows startup registry entry written by `toggle_startup`).
+/// Returns `true` when launched with `--minimized` (i.e. via the Run entry).
 ///
-/// When this returns `true` the caller **must** call
-/// `hdr_panel.schedule_hdr_recheck()` after `init_d3d`.  Windows' display
-/// subsystem is not yet fully initialised at startup, so `is_any_monitor_hdr()`
-/// inside `init_d3d` would return `false` even on an HDR monitor, leaving the
-/// panel rendering in gray SDR mode until the app is restarted.  The deferred
-/// recheck runs on the first `render_tick` after the window becomes visible,
-/// by which time the HDR state is reliable.
+/// If true, call `hdr_panel.schedule_hdr_recheck()` after `init_d3d`.
+/// The display subsystem isn't fully up at startup, so `is_any_monitor_hdr()`
+/// returns false even on HDR monitors; the deferred recheck fires on the first
+/// `render_tick` after the window becomes visible, by which time HDR is reliable.
 pub fn launched_minimized() -> bool {
     std::env::args().any(|a| a == "--minimized")
 }
 
-/// Add or remove the HKCU Run entry based on `enabled`.
-/// Returns a status string suitable for display in the UI.
+/// Adds or removes the HKCU Run entry. Returns a status string for the UI.
 pub unsafe fn toggle_startup(enabled: bool) -> &'static str {
     if enabled {
         if let Ok(exe) = std::env::current_exe() {

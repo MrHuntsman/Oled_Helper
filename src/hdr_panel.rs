@@ -1,10 +1,10 @@
-// hdr_panel.rs
+// hdr_panel.rs — D3D11 near-black calibration panel.
 //
-// D3D11 calibration panel — fixed for windows-rs 0.58 API:
-//   • All Create* methods use output-param pattern: device.CreateFoo(&desc, init, Some(&mut out))?
-//   • D3DResources.rtv is Option<> (reset during resize)
+// windows-rs 0.58 API notes:
+//   • Create* methods use output-param pattern: device.CreateFoo(&desc, init, Some(&mut out))?
+//   • D3DResources.rtv is Option<> (released during resize)
 //   • ResizeBuffers takes typed DXGI_SWAP_CHAIN_FLAG
-//   • Map takes output *mut D3D11_MAPPED_SUBRESOURCE
+//   • Map takes *mut D3D11_MAPPED_SUBRESOURCE
 //   • ClearRenderTargetView takes &[f32; 4]
 //   • Present takes u32 flags directly
 
@@ -132,34 +132,25 @@ impl D3DResources {
     }
 }
 
-// ── Public HdrPanel ───────────────────────────────────────────────────────────
+// ── HdrPanel ─────────────────────────────────────────────────────────────────
 
 pub struct HdrPanel {
     pub hwnd:         HWND,
     pub hdr_active:   bool,
     pub square_count: usize,
-    sq_values_hdr:    [f32; MAX_SQUARES],
-    sq_values_sdr:    [f32; MAX_SQUARES],
-    sq_values:        [f32; MAX_SQUARES],
+    sq_values_hdr: [f32; MAX_SQUARES],
+    sq_values_sdr: [f32; MAX_SQUARES],
+    sq_values:     [f32; MAX_SQUARES],
     render_dirty:          bool,
-    /// Set when `square_count` changes; causes `rebuild_digit_texture` to be
-    /// called once at the start of the next `render_tick`, not on every drag tick.
+    /// Texture rebuild is deferred to the next render_tick after set_square_count.
     digit_texture_dirty:   bool,
-    /// Remaining number of ticks to retry HDR status checks.  DXGI often
-    /// reports stale color space data for a few hundred milliseconds after
-    /// a toggle while the driver settles; this counter creates a polling
-    /// window to ensure we catch the transition.
+    /// Remaining ticks to retry HDR status; DXGI data can be stale for ~hundreds of ms after a toggle.
     hdr_recheck_count:     u32,
-    /// Set after every `init_d3d` and cleared after the first successful
-    /// `Present`.  The DWM compositor doesn't connect a FLIP swap chain's
-    /// surface to the visual tree until after the HWND has been re-shown
-    /// at the OS level; calling `InvalidateRect` on the panel HWND after
-    /// the first present forces DWM to re-composite and eliminates the
-    /// solid-grey flash that would otherwise persist until the next resize.
+    /// Set after init_d3d; cleared after first Present. Forces DWM re-composite to avoid grey flash.
     needs_compositor_poke: bool,
-    d3d:              Option<D3DResources>,
-    width:            u32,
-    height:           u32,
+    d3d:    Option<D3DResources>,
+    width:  u32,
+    height: u32,
 }
 
 unsafe impl Send for HdrPanel {}
@@ -177,10 +168,8 @@ impl HdrPanel {
             hwnd: HWND(ptr::null_mut()),
             hdr_active: false, square_count: 9,
             sq_values_hdr, sq_values_sdr, sq_values: sq_values_sdr,
-            render_dirty: true,
-            digit_texture_dirty: false,
-            hdr_recheck_count: 0,
-            needs_compositor_poke: false,
+            render_dirty: true, digit_texture_dirty: false,
+            hdr_recheck_count: 0, needs_compositor_poke: false,
             d3d: None, width: 0, height: 0,
         }
     }
@@ -195,10 +184,9 @@ impl HdrPanel {
 
     unsafe fn init_d3d_inner(&mut self, hwnd: HWND, w: u32, h: u32) -> Result<()> {
         let feat = [D3D_FEATURE_LEVEL_11_0];
-        let mut dev_out: Option<ID3D11Device>        = None;
-        let mut ctx_out: Option<ID3D11DeviceContext>  = None;
+        let mut dev_out: Option<ID3D11Device>       = None;
+        let mut ctx_out: Option<ID3D11DeviceContext> = None;
         let mut feat_out = D3D_FEATURE_LEVEL_11_0;
-
         D3D11CreateDevice(
             None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(),
             D3D11_CREATE_DEVICE_FLAG::default(), Some(&feat), D3D11_SDK_VERSION,
@@ -218,10 +206,8 @@ impl HdrPanel {
             s!("PS"), s!("ps_5_0"), 0, 0, &mut ps_blob, None)?;
         let vsb = vs_blob.ok_or(Error::from(E_FAIL))?;
         let psb = ps_blob.ok_or(Error::from(E_FAIL))?;
-        let vs_bytes = std::slice::from_raw_parts(
-            vsb.GetBufferPointer() as *const u8, vsb.GetBufferSize());
-        let ps_bytes = std::slice::from_raw_parts(
-            psb.GetBufferPointer() as *const u8, psb.GetBufferSize());
+        let vs_bytes = std::slice::from_raw_parts(vsb.GetBufferPointer() as *const u8, vsb.GetBufferSize());
+        let ps_bytes = std::slice::from_raw_parts(psb.GetBufferPointer() as *const u8, psb.GetBufferSize());
 
         let mut vs_out: Option<ID3D11VertexShader> = None;
         device.CreateVertexShader(vs_bytes, None, Some(&mut vs_out))?;
@@ -231,7 +217,7 @@ impl HdrPanel {
         device.CreatePixelShader(ps_bytes, None, Some(&mut ps_out))?;
         let ps = ps_out.ok_or(Error::from(E_FAIL))?;
 
-        // Constant buffer (112 bytes = 7 × float4)
+        // Constant buffer
         let cb_desc = D3D11_BUFFER_DESC {
             ByteWidth:      112,
             Usage:          D3D11_USAGE_DYNAMIC,
@@ -259,8 +245,8 @@ impl HdrPanel {
         let sampler = samp_out.ok_or(Error::from(E_FAIL))?;
 
         // Swap chain
-        let dxgi_device: IDXGIDevice  = device.cast()?;
-        let adapter:     IDXGIAdapter = dxgi_device.GetAdapter()?;
+        let dxgi_device: IDXGIDevice   = device.cast()?;
+        let adapter:     IDXGIAdapter  = dxgi_device.GetAdapter()?;
         let factory2:    IDXGIFactory2 = adapter.GetParent()?;
 
         let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -275,16 +261,11 @@ impl HdrPanel {
             Flags:       0,
             ..Default::default()
         };
-        let sc1: IDXGISwapChain1 = factory2.CreateSwapChainForHwnd(
-            &device, hwnd, &sc_desc, None, None)?;
+        let sc1: IDXGISwapChain1 = factory2.CreateSwapChainForHwnd(&device, hwnd, &sc_desc, None, None)?;
         factory2.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)?;
         let swap3: IDXGISwapChain3 = sc1.cast()?;
         let _ = swap3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
         self.hdr_active = is_any_monitor_hdr();
-        // For startup-minimized launches the caller calls schedule_hdr_recheck()
-        // immediately after init_d3d(), which resets hdr_active to false and sets
-        // hdr_recheck_pending so render_tick re-queries on the first visible tick,
-        // by which time the display subsystem is fully initialised.
 
         let mut res = D3DResources {
             device, ctx, swap3, rtv: None,
@@ -296,41 +277,30 @@ impl HdrPanel {
         self.recompute_square_values();
         self.rebuild_digit_texture();
         self.render_dirty = true;
-        // Signal that we need to poke the compositor after the first present.
-        // See the field comment on `needs_compositor_poke` for why this is needed.
         self.needs_compositor_poke = true;
         Ok(())
     }
 
-    // ── Public update / resize ────────────────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────────
 
-    /// Schedules a sequence of HDR status re-checks over the next several
-    /// render ticks.  Required because DXGI often reports stale colour space
-    /// data for a few hundred milliseconds after an HDR toggle or resolution
-    /// switch while the driver finishes reconfiguring the pipeline.
+    /// Schedules HDR status re-checks over the next 10 ticks (~1 s).
+    /// Needed because DXGI reports stale color space data briefly after a toggle.
     pub fn schedule_hdr_recheck(&mut self) {
-        // Setting a retry count causes render_tick() to re-query
-        // is_any_monitor_hdr() over the next several ticks (10 ticks at 100ms
-        // = 1 second window) to ensure the UI eventually reflects the true
-        // hardware state once the driver has settled.
         self.hdr_recheck_count = 10;
     }
 
     pub unsafe fn update(&mut self, black_lift: i32) {
-        let _ = black_lift; // lift is applied via SetDeviceGammaRamp; panel uses raw values
+        let _ = black_lift; // lift applied via SetDeviceGammaRamp; panel uses raw values
         self.recompute_square_values();
         self.render_dirty = true;
     }
 
+    /// Defers digit texture rebuild to the next render_tick to avoid blocking on every drag tick.
     pub unsafe fn set_square_count(&mut self, count: usize) {
         let count = count.clamp(1, MAX_SQUARES);
         if self.square_count == count { return; }
         self.square_count = count;
         self.recompute_square_values();
-        // Do NOT call rebuild_digit_texture() here — that does a full GDI rasterise
-        // + CreateTexture2D + CreateShaderResourceView on every drag tick, which is
-        // expensive enough to make the slider feel like low-FPS.  Instead, mark the
-        // texture stale and let render_tick rebuild it once when the slider settles.
         self.digit_texture_dirty = true;
         self.render_dirty = true;
     }
@@ -339,11 +309,8 @@ impl HdrPanel {
         if w < 1 || h < 1 { return; }
         self.width = w; self.height = h;
         if let Some(ref mut res) = self.d3d {
-            res.rtv = None; // release before resize
-            let _ = res.swap3.ResizeBuffers(
-                0, w, h, DXGI_FORMAT_UNKNOWN,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            );
+            res.rtv = None; // must release before ResizeBuffers
+            let _ = res.swap3.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0));
             let _ = res.create_rtv();
         }
         self.rebuild_digit_texture();
@@ -362,38 +329,39 @@ impl HdrPanel {
         changed
     }
 
-    /// Executes periodic maintenance and rendering. Returns `true` if the HDR
-    /// status changed during this tick.
+    /// Periodic maintenance + rendering. Returns `true` if HDR status changed.
     pub unsafe fn render_tick(&mut self) -> bool {
         let mut hdr_changed = false;
-        // Proactively detect device loss even when not dirty, so a driver
-        // restart while the panel is hidden still gets caught on the next tick.
         if self.is_device_lost() {
             self.recover_device();
             return false;
         }
-        // Periodically re-check HDR status if a re-check window is active.
         if self.hdr_recheck_count > 0 {
             self.hdr_recheck_count -= 1;
             hdr_changed = self.refresh_hdr_status();
             if hdr_changed { self.hdr_recheck_count = 0; }
         }
-        // Rebuild the digit texture lazily — only once the slider has settled
-        // (i.e. on the first render_tick after set_square_count was called),
-        // instead of on every drag tick where the GPU upload would block the UI.
+        // Rebuild digit texture lazily after slider settles
         if self.digit_texture_dirty {
             self.digit_texture_dirty = false;
             self.rebuild_digit_texture();
         }
         if self.render_dirty {
             self.render_dirty = false;
-            let lost = self.render();
-            if lost { self.recover_device(); }
+            if self.render() { self.recover_device(); }
         }
         hdr_changed
     }
 
-    /// Returns true if the D3D device has been removed (driver restart / GPU reset).
+    /// Release GPU resources while hidden (~40 MB VRAM). Flushed before drop.
+    pub unsafe fn suspend_d3d(&mut self) {
+        if let Some(ref res) = self.d3d { res.ctx.Flush(); }
+        self.d3d = None;
+        self.render_dirty = true;
+    }
+
+    // ── Internal ─────────────────────────────────────────────────────────────
+
     unsafe fn is_device_lost(&self) -> bool {
         match &self.d3d {
             None => false,
@@ -401,7 +369,6 @@ impl HdrPanel {
         }
     }
 
-    /// Drop the lost device and rebuild it from scratch.
     unsafe fn recover_device(&mut self) {
         self.d3d = None;
         self.render_dirty = true;
@@ -410,30 +377,8 @@ impl HdrPanel {
         }
     }
 
-    /// Release all GPU resources while the window is hidden (minimized to tray).
-    ///
-    /// Drops the D3D device, swap chain, and all associated VRAM allocations
-    /// (~40 MB) so they are not held while the UI is invisible.  `render_dirty`
-    /// is set so the first `render_tick` after `init_d3d` repaints immediately.
-    /// The context is flushed before dropping to ensure the GPU has no
-    /// in-flight work referencing any of the released resources.
-    pub unsafe fn suspend_d3d(&mut self) {
-        if let Some(ref res) = self.d3d {
-            // Flush any pending GPU commands before releasing the device so the
-            // driver doesn't hold references past the drop.
-            res.ctx.Flush();
-        }
-        self.d3d = None;
-        self.render_dirty = true;
-    }
-
-    // ── Internal ─────────────────────────────────────────────────────────────
-
     fn recompute_square_values(&mut self) {
-        if self.hdr_active { self.sq_values = self.sq_values_hdr; return; }
-        // Use raw sRGB values — the GPU gamma ramp lifts them the same as any
-        // other SDR content, so the panel matches what the browser renders.
-        self.sq_values = self.sq_values_sdr;
+        self.sq_values = if self.hdr_active { self.sq_values_hdr } else { self.sq_values_sdr };
     }
 
     unsafe fn rebuild_digit_texture(&mut self) {
@@ -451,16 +396,16 @@ impl HdrPanel {
         let stride = (tex_w * 4) as usize;
         let mut pixels = vec![0u8; stride * tex_h as usize];
 
-        // GDI rasterise labels into BGRA8 buffer
+        // GDI-rasterise labels into a BGRA8 off-screen bitmap
         let screen_dc = GetDC(HWND(ptr::null_mut()));
         let mem_dc    = CreateCompatibleDC(screen_dc);
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
-                biSize:     mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth:    tex_w,
-                biHeight:   -tex_h, // top-down
-                biPlanes:   1,
-                biBitCount: 32,
+                biSize:        mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth:       tex_w,
+                biHeight:      -tex_h, // top-down
+                biPlanes:      1,
+                biBitCount:    32,
                 biCompression: BI_RGB.0,
                 ..Default::default()
             },
@@ -471,7 +416,6 @@ impl HdrPanel {
             &mut bits_ptr, HANDLE::default(), 0).expect("CreateDIBSection");
         SelectObject(mem_dc, hbmp);
 
-        // Cap at 22 px so labels don't balloon when the panel is tall (e.g. maximised).
         let label_px = ((cell_w.min(cell_h) as f32) * 0.36).clamp(5.0, 50.0) as i32;
         let hfont = CreateFontW(
             label_px, 0, 0, 0, FW_REGULAR.0 as i32, 0, 0, 0,
@@ -480,7 +424,7 @@ impl HdrPanel {
             (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, w!("Segoe UI"),
         );
         SelectObject(mem_dc, hfont);
-        SetTextColor(mem_dc, COLORREF(0x00606060)); // mid-gray: readable above near-black, not glaring
+        SetTextColor(mem_dc, COLORREF(0x00606060)); // mid-gray: readable above near-black
         SetBkMode(mem_dc, TRANSPARENT);
 
         let is_hdr = self.hdr_active;
@@ -502,18 +446,12 @@ impl HdrPanel {
             let line_gap  = (cell_h as f32 * 0.02) as i32;
             let block_h   = dig_sz.cy + line_gap + lbl_sz.cy;
             let block_top = cell_h - block_h - (cell_h as f32 * 0.05) as i32;
-
-            let dx = ox + (cell_w - dig_sz.cx) / 2;
-            let lx = ox + (cell_w - lbl_sz.cx) / 2;
-            TextOutW(mem_dc, dx, block_top, &dig_w);
-            TextOutW(mem_dc, lx, block_top + dig_sz.cy + line_gap, &lbl_w);
+            TextOutW(mem_dc, ox + (cell_w - dig_sz.cx) / 2, block_top, &dig_w);
+            TextOutW(mem_dc, ox + (cell_w - lbl_sz.cx) / 2, block_top + dig_sz.cy + line_gap, &lbl_w);
         }
 
-        // Copy GDI bits and fix alpha channel.
-        // GDI renders into BGRA: bytes are [B, G, R, A] = indices [0, 1, 2, 3].
-        // Text pixels are gray (B=G=R=0x60); background pixels are 0,0,0,0.
-        // Use blue channel as alpha: 0x60 (96) for text, 0 for background.
-        // texSample.r in shader = R channel = 0x60/255 ≈ 0.376 → readable mid-gray overlay.
+        // Copy GDI BGRA bits; use blue channel as alpha (text=0x60, background=0x00).
+        // shader: texSample.r = R channel ≈ 0x60/255 ≈ 0.376 → readable mid-gray overlay.
         let gdi = std::slice::from_raw_parts(bits_ptr as *const u8, stride * tex_h as usize);
         pixels.copy_from_slice(gdi);
         for px in pixels.chunks_exact_mut(4) { px[3] = px[0]; } // alpha = B channel
@@ -523,7 +461,7 @@ impl HdrPanel {
         DeleteDC(mem_dc);
         ReleaseDC(HWND(ptr::null_mut()), screen_dc);
 
-        // Upload texture
+        // Upload to GPU
         res.digit_srv = None; res.digit_tex = None;
         let tex_desc = D3D11_TEXTURE2D_DESC {
             Width: tex_w as u32, Height: tex_h as u32,
@@ -551,8 +489,7 @@ impl HdrPanel {
         }
     }
 
-    /// Renders one frame. Returns true if the device was lost and the caller
-    /// should call `recover_device()`.
+    /// Renders one frame. Returns `true` if device was lost (caller should call `recover_device`).
     unsafe fn render(&mut self) -> bool {
         let res = match &mut self.d3d { Some(r) => r, None => return false };
         let rtv = match &res.rtv { Some(r) => r.clone(), None => return false };
@@ -581,70 +518,44 @@ impl HdrPanel {
 
         res.ctx.ClearRenderTargetView(&rtv, &[0f32, 0.0, 0.0, 1.0]);
         res.ctx.OMSetRenderTargets(Some(&[Some(rtv)]), None);
-        let vp = D3D11_VIEWPORT {
+        res.ctx.RSSetViewports(Some(&[D3D11_VIEWPORT {
             Width: self.width as f32, Height: self.height as f32, MaxDepth: 1.0,
             ..Default::default()
-        };
-        res.ctx.RSSetViewports(Some(&[vp]));
+        }]));
         res.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         res.ctx.VSSetShader(&res.vs, None);
         res.ctx.PSSetShader(&res.ps, None);
         res.ctx.PSSetConstantBuffers(0, Some(&[Some(res.cb.clone())]));
-
-        if let (Some(srv), _) = (&res.digit_srv, &res.sampler) {
+        if let Some(srv) = &res.digit_srv {
             res.ctx.PSSetShaderResources(0, Some(&[Some(srv.clone())]));
             res.ctx.PSSetSamplers(0, Some(&[Some(res.sampler.clone())]));
         }
-
         res.ctx.Draw(3, 0);
 
-        // Present without V-sync blocking (SyncInterval=0, DXGI_PRESENT_DO_NOT_WAIT).
-        //
-        // The panel only renders when `render_dirty` is set — on discrete user
-        // actions (slider move, resize, HDR toggle), never on a continuous loop.
-        // SyncInterval=1 would block the UI-thread timer callback until the next
-        // vblank, injecting exactly the irregular cadence that makes VRR stutter.
-        //
-        // DXGI_PRESENT_DO_NOT_WAIT (0x08): if the previous frame hasn't been
-        // consumed yet, DXGI returns DXGI_ERROR_WAS_STILL_DRAWING.  We re-set
-        // render_dirty so the next render_tick retries — the in-flight frame
-        // already shows correct content so no visual glitch occurs.
-        //
-        // Device-removal errors (DEVICE_REMOVED 0x887A0005 / DEVICE_RESET
-        // 0x887A0007) are still caught and forwarded to the caller.
-        const DXGI_PRESENT_DO_NOT_WAIT: u32 = 0x08;
+        // SyncInterval=0 + DO_NOT_WAIT: avoids blocking the UI thread until vblank (VRR stutter).
+        // If the previous frame is still in flight, DXGI returns WAS_STILL_DRAWING;
+        // re-set render_dirty to retry — in-flight frame already shows correct content.
+        const DXGI_PRESENT_DO_NOT_WAIT:     u32 = 0x08;
         const DXGI_ERROR_WAS_STILL_DRAWING: i32 = 0x887A000Au32 as i32;
-        let present_result = res.swap3.Present(0, DXGI_PRESENT(DXGI_PRESENT_DO_NOT_WAIT));
-        if present_result.is_err() {
-            if present_result == windows::core::HRESULT(DXGI_ERROR_WAS_STILL_DRAWING).into() {
-                self.render_dirty = true; // retry on next tick
+        let result = res.swap3.Present(0, DXGI_PRESENT(DXGI_PRESENT_DO_NOT_WAIT));
+        if result.is_err() {
+            if result == windows::core::HRESULT(DXGI_ERROR_WAS_STILL_DRAWING).into() {
+                self.render_dirty = true;
                 return false;
             }
             if res.device.GetDeviceRemovedReason().is_err() {
-                return true; // signal device loss to caller
+                return true; // device lost
             }
         }
 
-        // After the first present following an init_d3d, the DWM compositor
-        // may not yet have connected the swap chain surface to the visual tree
-        // (this happens when the HWND was hidden/suspended via tray minimize).
-        // Calling InvalidateRect forces DWM to re-composite the child window,
-        // eliminating the solid-grey flash that would persist until the next
-        // WM_SIZE or user interaction.
-        // in render(), around line 634:
+        // After init_d3d, poke DWM to re-composite and clear the grey flash
+        // (no WM_SIZE arrives on tray-restore if size is unchanged).
         if self.needs_compositor_poke {
             self.needs_compositor_poke = false;
-            // Queue a second frame so DWM receives a fresh present *after* the
-            // InvalidateRect poke.  On normal first-show WM_SIZE arrives and
-            // provides this naturally; on tray-restore after a startup-minimized
-            // launch there is no WM_SIZE (size unchanged), so without this line
-            // render_dirty stays false and the grey placeholder DWM shows while
-            // the new swap-chain surface settles is never overwritten.
-            self.render_dirty = true;
+            self.render_dirty = true; // queue second frame after the poke
             use windows::Win32::Graphics::Gdi::InvalidateRect;
             InvalidateRect(self.hwnd, None, false);
         }
-
         false
     }
 }

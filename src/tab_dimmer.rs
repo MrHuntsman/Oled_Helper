@@ -1,6 +1,5 @@
-// tab_dimmer.rs — Taskbar Dimmer state, overlays, and animation.
-// Rendering helpers live in ui_drawing.rs.
-// Compile-time constants and IDs live in constants.rs.
+// tab_dimmer.rs — Dimmer state, overlays, and animation.
+// Rendering: ui_drawing.rs  |  Constants/IDs: constants.rs
 
 #![allow(non_snake_case, clippy::too_many_lines, unused_variables,
          unused_mut, unused_assignments, unused_must_use)]
@@ -25,20 +24,15 @@ use windows::{
     },
 };
 
-// ABS_AUTOHIDE is not re-exported by windows-rs Shell bindings — define locally.
+// Not re-exported by windows-rs Shell bindings.
 const ABS_AUTOHIDE: u32 = 0x0000_0001;
 
-// SWP_NOSENDCHANGING prevents shell windows from re-asserting Z-order
-// during our SetWindowPos call.
+// Prevents shell windows from re-asserting Z-order during SetWindowPos.
 const SWP_NOSENDCHANGING: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(0x0400);
 
-// ── Refresh-rate-aware fade interval ─────────────────────────────────────────
-//
-// Stores the active timer interval for TIMER_OVERLAY_FADE in milliseconds.
-// Defaults to 16 ms (≈60 Hz).  Updated by `set_fade_interval_from_hz` whenever
-// the display refresh rate changes (WM_DISPLAYCHANGE or user selects a new rate
-// in the dropdown).  Using an atomic means app.rs can write it from the WndProc
-// without needing a mutable borrow of DimmerTab.
+// Active timer interval for TIMER_OVERLAY_FADE in ms. Defaults to 16 (≈60 Hz).
+// Updated by `set_fade_interval_from_hz` on display-rate changes.
+// Atomic so app.rs can write it from WndProc without borrowing DimmerTab.
 pub static OVERLAY_FADE_INTERVAL_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
 
 /// Updates fade timer interval based on Hz.
@@ -50,7 +44,7 @@ pub fn set_fade_interval_from_hz(hz: i32) {
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS};
 
-// Fires when shell panels (Quick Settings, etc) displace our overlays.
+// Fires when shell panels (Quick Settings, etc.) displace our overlays.
 const EVENT_OBJECT_SHOW: u32 = 0x8002;
 
 use crate::{
@@ -60,15 +54,10 @@ use crate::{
     win32::ControlGroup,
 };
 
-// ── UTF-16 class-name constants ───────────────────────────────────────────────
-//
-// `GetClassNameW` returns a NUL-free slice of u16 code units.  Comparing that
-// slice directly against these `const` arrays avoids the `String::from_utf16_lossy`
-// heap allocation that was previously done on every call-site.
-//
-// `ascii_to_utf16` converts an ASCII byte string to a fixed-length u16 array at
-// compile time, which is far less error-prone than spelling out each character
-// individually as `b'X' as u16`.
+// UTF-16 class-name constants for zero-alloc slice comparisons.
+// `GetClassNameW` returns a NUL-free u16 slice; comparing directly avoids
+// the String::from_utf16_lossy allocation done at each call-site.
+// `ascii_to_utf16` converts ASCII byte strings to u16 arrays at compile time.
 
 const fn ascii_to_utf16<const N: usize>(s: &[u8; N]) -> [u16; N] {
     let mut out = [0u16; N];
@@ -90,15 +79,9 @@ const CLS_SEC_TRAY: &[u16] = &CLS_SEC_TRAY_ARR;
 const CLS_PROGMAN:  &[u16] = &CLS_PROGMAN_ARR;
 const CLS_WORKER_W: &[u16] = &CLS_WORKER_W_ARR;
 
-// ── Shell panel classes that displace overlays when they appear ───────────────
-// These are TOPMOST windows spawned by the shell (Quick Settings, Action Center,
-// Start menu host, notification toasts, etc.) that appear on top of our overlay
-// when the user interacts with the taskbar.  When EVENT_OBJECT_SHOW fires for
-// any of these we immediately re-raise the overlays.
-//
-// Class names confirmed from the log: ControlCenterWindow fires reliably for
-// Quick Settings.  The others cover Action Center, Start, search, and toast
-// notification hosts across Windows 10 / 11 variants.
+// Shell panel classes that appear on top of our overlays (Quick Settings,
+// Action Center, Start, search, toast hosts). On EVENT_OBJECT_SHOW we
+// immediately re-raise the overlays.
 const CLS_CTRL_CENTER_ARR:  [u16; 19] = ascii_to_utf16(b"ControlCenterWindow");
 const CLS_XAML_HOST_ARR:    [u16; 28] = ascii_to_utf16(b"XamlExplorerHostIslandWindow");
 const CLS_ACTION_CTR_ARR:   [u16; 22] = ascii_to_utf16(b"ActionCenterExperience");
@@ -111,9 +94,8 @@ const CLS_ACTION_CTR:   &[u16] = &CLS_ACTION_CTR_ARR;
 const CLS_NOTIF_TOAST:  &[u16] = &CLS_NOTIF_TOAST_ARR;
 const CLS_START_HOST:   &[u16] = &CLS_START_HOST_ARR;
 
-/// Return `true` if the class name slice matches any known shell panel class
-/// that is expected to displace overlay windows when it appears.
-/// Zero allocations — compares u16 slices directly against compile-time arrays.
+/// True if the class matches any shell panel that displaces overlay windows.
+/// Zero allocations — compares u16 slices against compile-time arrays.
 #[inline]
 fn is_displacing_shell_panel(cls: &[u16]) -> bool {
     cls == CLS_CTRL_CENTER
@@ -123,42 +105,34 @@ fn is_displacing_shell_panel(cls: &[u16]) -> bool {
         || cls == CLS_START_HOST
 }
 
-// ── Hook → UI-thread message ──────────────────────────────────────────────────
+// ── Hook → UI-thread messages ─────────────────────────────────────────────────
 
-/// Custom WM_APP message posted by `zorder_winevent_proc` to the main window
-/// so fullscreen re-evaluation happens on the UI thread.
+/// Posted by `zorder_winevent_proc` to trigger fullscreen re-evaluation on the UI thread.
 pub const WM_APP_FULLSCREEN_CHECK: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 
-/// Posted by `zorder_winevent_proc` on `EVENT_OBJECT_SHOW` when a known shell
-/// panel window appears (e.g. ControlCenterWindow, XamlExplorerHostIslandWindow).
-/// The UI thread responds by immediately re-raising all overlays to HWND_TOPMOST.
-/// wparam / lparam are unused.
+/// Posted by `object_show_proc` when a displacing shell panel appears.
+/// UI thread responds by re-raising all overlays to HWND_TOPMOST.
 pub const WM_APP_RAISE_OVERLAYS: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 
 
 
 
 
-/// The main window HWND stored as a raw pointer so `zorder_winevent_proc`
-/// (which runs on a system-hook thread) can post messages back to the UI.
-/// Also read by the WH_MOUSE_LL hook proc in tab_debug.
+/// Main window HWND as an atomic isize so the WinEvent hook thread can post
+/// messages back to the UI. Also read by the WH_MOUSE_LL hook in tab_debug.
 pub static MAIN_HWND_FOR_HOOK: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 
-/// Register the main HWND so the WinEvent hook proc can post messages to it.
-/// Call once after the main window is created.
+/// Register the main HWND for use by the WinEvent hook proc. Call once after creation.
 pub fn register_main_hwnd(hwnd: HWND) {
     MAIN_HWND_FOR_HOOK.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Primary taskbar HWND cached for potential future use.
+/// Primary taskbar HWND cached for zero-syscall lookup in the hook proc.
 pub static TRAY_HWND_FOR_HOOK: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 
-
-
-/// Cache the primary taskbar HWND for zero-syscall lookup in the hook proc.
-/// Call once after overlays are first created and again after display changes.
+/// Cache the primary taskbar HWND. Call once after overlays are created and after display changes.
 pub unsafe fn cache_tray_hwnd() {
     if let Ok(h) = FindWindowW(w!("Shell_TrayWnd"), None) {
         TRAY_HWND_FOR_HOOK.store(h.0 as isize, std::sync::atomic::Ordering::Relaxed);
@@ -175,43 +149,31 @@ pub enum ZLogKind {
     MinimizeEnd,
     OverlayRaised,
     /// Z-order position sampled after a HWND_TOPMOST call, logged only on change.
-    /// payload = ((overlay_index as u32 as u64) << 32) | (1-based z-pos as u64)
-    /// Position 1 = topmost window on the desktop (correct state).
-    /// u32::MAX in the low word means the overlay HWND was not found in the chain.
+    /// payload = ((overlay_index as u32) << 32) | (1-based z-pos as u32)
+    /// Position 1 = topmost; u32::MAX = overlay not found in chain.
     OverlayZPos,
-    /// A mouse button was clicked somewhere on screen.
-    /// payload = ((x as u32 as u64) << 32) | (y as u32 as u64)
+    /// payload = ((x as u32) << 32) | (y as u32)
     MouseClick,
     /// Dimmer suppression state changed (hover / fullscreen / auto-hide).
     /// payload bits: 0=hovering 1=fullscreen 2=autohide 3=enabled
-    /// detail = human-readable description of the new state.
     DimmerStateChange,
-    /// WM_DPICHANGED received by the main window.
-    /// payload = new DPI as u64.
+    /// WM_DPICHANGED received. payload = new DPI.
     DpiChanged,
-    /// WM_DISPLAYCHANGE received by the main window.
-    /// payload = (new_width as u32 as u64) << 32 | (new_height as u32 as u64).
+    /// WM_DISPLAYCHANGE received. payload = (width << 32) | height.
     DisplayChange,
-    /// A timed phase inside WM_APP_DEFERRED_DPI_RESIZE.
-    /// payload bits encode the phase and elapsed time so each call-site
-    /// produces a distinct, easily diff-able log line:
-    ///   bits [63:48] = phase id  (0=entry, 1=after SetWindowPos, 2=after RedrawWindow)
-    ///   bits [47:0]  = ms since WM_DPICHANGED (delta from the DpiChanged tick above)
-    /// detail = human-readable description.
+    /// Phase inside WM_APP_DEFERRED_DPI_RESIZE.
+    /// bits [63:48] = phase (0=entry, 1=after SetWindowPos, 2=after RedrawWindow)
+    /// bits [47:0]  = ms since WM_DPICHANGED
     DeferredDpiResize,
-    /// reposition_overlays_now() completed (the immediate synchronous path).
-    /// payload = (num_rects as u32 as u64) << 32 | (elapsed_ms as u32 as u64).
+    /// reposition_overlays_now() completed. payload = (num_rects << 32) | elapsed_ms.
     RepositionNow,
-    /// tick_reposition() fired from the 500 ms safety-net timer.
-    /// payload = num_rects found by collect_taskbar_rects() as u64.
+    /// tick_reposition() fired from the 500 ms safety-net timer. payload = num_rects.
     RepositionSafetyNet,
     Other,
 }
 
 impl ZLogKind {
-    /// Short sigil prefix shown at the start of every log line.
-    /// 
-        
+    /// Sigil prefix for log display.
     pub fn label(self, payload: u64) -> String {
         match self {
             ZLogKind::ForegroundChange => {
@@ -274,13 +236,12 @@ impl ZLogKind {
 /// A single entry in the Z-order event ring.
 #[derive(Clone)]
 pub struct ZLogEntry {
-    /// Millisecond tick from `GetTickCount64` at the moment of the event.
+    /// `GetTickCount64` ms at event time.
     pub tick:    u64,
     pub kind:    ZLogKind,
-    /// Context-dependent payload (HWND cast to u64, index, etc.).
+    /// Context-dependent payload (HWND, index, etc.).
     pub payload: u64,
-    /// Optional rich description (e.g. window class + title for mouse clicks).
-    /// When non-empty the display uses this instead of `kind.label(payload)`.
+    /// Optional rich description. When non-empty, used instead of `kind.label(payload)`.
     pub detail:  String,
 }
 
@@ -288,7 +249,7 @@ pub struct ZLogEntry {
 #[allow(dead_code)]
 pub struct ZOrderLog {
     entries: std::collections::VecDeque<ZLogEntry>,
-    /// Total number of pushes ever made (monotonically increasing).
+    /// Total pushes ever (monotonically increasing).
     pub count: usize,
     capacity: usize,
 }
@@ -307,8 +268,7 @@ impl ZOrderLog {
         self.count += 1;
     }
 
-    /// Return up to `n` most recent entries (oldest first so the caller can
-    /// iterate `.rev()` to display newest-first).
+    /// Returns up to `n` most recent entries, oldest first.
     pub fn recent(&self, n: usize) -> Vec<ZLogEntry> {
         let skip = self.entries.len().saturating_sub(n);
         self.entries.iter().skip(skip).cloned().collect()
@@ -349,85 +309,60 @@ pub struct DimmerTab {
     pub h_lbl_fade_out_val:   HWND,
     pub h_btn_dim_defaults:   HWND,
 
-    /// Controls that are only visible when the dimmer is enabled (grouped for
-    /// easy show/hide via `grp_dim_controls.set_visible()`).
+    /// Controls shown only when the dimmer is enabled; toggled via `grp_dim_controls.set_visible()`.
     pub grp_dim_controls: ControlGroup,
 
     // ── Runtime state ─────────────────────────────────────────────────────────
-    /// Whether the "Enable Taskbar Dimmer" checkbox is currently checked.
     pub enabled: bool,
-
-    /// Black overlay windows, one per taskbar (primary + secondaries).
+    /// One overlay per taskbar (primary + secondaries).
     pub taskbar_overlays: Vec<HWND>,
 
-    /// Current alpha of the overlays as an f32 for smooth interpolation (0–255).
-    pub overlay_alpha_current: f32,
-    /// Target alpha the fade animation is moving toward.
-    pub overlay_alpha_target: f32,
-    /// The "full dim" alpha derived from the slider — used as the fade-in target.
-    pub overlay_alpha_full: f32,
-    /// Tick count (ms) when the current fade transition started.
-    pub overlay_fade_start_time: u64,
-    /// Alpha value at the moment the current fade transition started.
+    /// f32 for smooth interpolation (0–255).
+    pub overlay_alpha_current:    f32,
+    /// Fade target.
+    pub overlay_alpha_target:     f32,
+    /// Alpha derived from slider; used as the fade-in target.
+    pub overlay_alpha_full:       f32,
+    /// Tick (ms) when the current fade transition started.
+    pub overlay_fade_start_time:  u64,
     pub overlay_fade_start_alpha: f32,
-    /// Duration in ms for the overlay to fade in (transparent → dim, cursor leaves taskbar).
-    pub overlay_fade_in_ms: f32,
-    /// Duration in ms for the overlay to fade out (dim → transparent, cursor hovers).
-    pub overlay_fade_out_ms: f32,
+    /// Fade in: transparent → dim (cursor leaves taskbar).
+    pub overlay_fade_in_ms:       f32,
+    /// Fade out: dim → transparent (cursor hovers).
+    pub overlay_fade_out_ms:      f32,
 
-    // ── Suppression flags (exposed to debug tab) ──────────────────────────────
-    pub suppress_fs_enabled:   bool,
-    pub suppress_ah_enabled:   bool,
+    // ── Suppression flags ─────────────────────────────────────────────────────
+    pub suppress_fs_enabled: bool,  // hide overlay when fullscreen
+    pub suppress_ah_enabled: bool,  // hide overlay when auto-hide active
 
-    /// HWND of the main window — needed to arm/kill the fade timer.
+    /// Needed to arm/kill the fade timer.
     main_hwnd: HWND,
 
-    // ── Performance optimisation fields ───────────────────────────────────────
-
-    /// Cached taskbar RECTs — refreshed only on display-change / overlay-create,
-    /// not on every 16 ms tick.  Eliminates the `EnumWindows` spam.
+    // ── Performance ───────────────────────────────────────────────────────────
+    /// Refreshed only on display-change/overlay-create, not every tick.
     pub cached_taskbar_rects: Vec<RECT>,
-
-    /// The last alpha value actually sent to `SetLayeredWindowAttributes`.
-    /// We skip the DWM call when the rounded integer hasn't changed.
+    /// Last alpha sent to `SetLayeredWindowAttributes`; skip DWM call if unchanged.
     pub last_applied_alpha: u8,
-
-    /// Cached fullscreen state — updated by `zorder_winevent_proc` via a
-    /// WM_APP message instead of re-querying every tick.
+    /// Updated via WM_APP from WinEvent hook, not re-queried every tick.
     pub fullscreen_active: bool,
-
-    /// Cached auto-hide state — updated every fade tick via SHAppBarMessage.
+    /// Updated each fade tick via SHAppBarMessage.
     pub taskbar_autohide: bool,
 
-    // ── Heavy-poll throttling ──────────────────────────────────────────────────
-    /// Wrapping counter incremented on every `tick_fade` call.
-    /// Heavy Win32 API calls (SHAppBarMessage, GetGUIThreadInfo, fullscreen check)
-    /// are only made when this is a multiple of `HEAVY_POLL_EVERY_N_TICKS` —
-    /// roughly every 500 ms at idle (100 ms × 5).
+    // ── Heavy-poll throttling ─────────────────────────────────────────────────
+    /// Wrapping counter; expensive Win32 calls only fire every N ticks (~500 ms idle).
     idle_heavy_tick: u32,
-
-    /// `GetTickCount64` value (ms) at which `SetWindowPos(HWND_TOPMOST)` was
-    /// last called on the overlays.  Used to throttle Z-order enforcement to
-    /// `Z_ORDER_BACKUP_INTERVAL_MS` (5 s) during idle, instead of every tick.
-    /// Set to 0 at startup so the first tick always enforces.
+    /// Tick of the last HWND_TOPMOST call; throttles Z-order enforcement to Z_ORDER_BACKUP_INTERVAL_MS.
     last_zorder_enforce_tick: u64,
-
-    /// Last-logged Z-order position for each overlay (1-based; u32::MAX = not found).
-    /// Indexed parallel to `taskbar_overlays`.  Only log when the position changes
-    /// so the debug log isn't flooded on every backup-interval tick.
+    /// Pre-raise Z-position per overlay (1-based; u32::MAX = not found). Logged only on change.
     last_logged_zpos: Vec<u32>,
 
-    /// Deadline for taskbar stabilization window.
+    /// Tick deadline for taskbar reflow stabilisation.
     reposition_until_tick: u64,
-
-    /// True while overlays are hidden waiting for taskbar to settle.
+    /// True while overlays are hidden waiting for the taskbar to settle.
     pub is_repositioning: bool,
 }
 
-// ── ZOrderWinEventHooks ───────────────────────────────────────────────────────
-// Placeholder struct for WinEvent hooks used to maintain overlay Z-order.
-// Extend this as your hook implementation grows.
-
+/// WinEvent hook handles. Unregisters all hooks on drop.
 pub struct ZOrderWinEventHooks {
     _hooks: Vec<HWINEVENTHOOK>,
 }
@@ -444,13 +379,9 @@ impl Drop for ZOrderWinEventHooks {
     }
 }
 
-/// Install WinEvent hooks for foreground-change and minimize events so the
-/// overlay Z-order can be corrected without a polling loop.
+/// Install WinEvent hooks for foreground-change, minimize, and shell-panel-show events.
+/// Uses WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS — no in-process DLL needed.
 pub unsafe fn install_zorder_winevent_hooks() -> ZOrderWinEventHooks {
-    // EVENT_SYSTEM_FOREGROUND  = 0x0003
-    // EVENT_SYSTEM_MINIMIZEEND = 0x0017
-    // Hook both with WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS so we
-    // don't need an in-process DLL.
     let h_fg = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND,
         EVENT_SYSTEM_FOREGROUND,
@@ -483,7 +414,7 @@ pub unsafe fn install_zorder_winevent_hooks() -> ZOrderWinEventHooks {
     ZOrderWinEventHooks { _hooks: hooks }
 }
 
-/// WinEvent proc for shell panel detection.
+/// WinEvent proc for EVENT_OBJECT_SHOW: posts WM_APP_RAISE_OVERLAYS when a displacing shell panel appears.
 unsafe extern "system" fn object_show_proc(
     _hook: HWINEVENTHOOK,
     _event: u32,
@@ -513,7 +444,7 @@ unsafe extern "system" fn object_show_proc(
     }
 }
 
-/// WinEvent proc for foreground/minimize events.
+/// WinEvent proc for foreground/minimize events: posts WM_APP_FULLSCREEN_CHECK to the UI thread.
 unsafe extern "system" fn zorder_winevent_proc(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -578,10 +509,8 @@ unsafe extern "system" fn zorder_winevent_proc(
 // ── DimmerTab impl ────────────────────────────────────────────────────────────
 
 impl DimmerTab {
-    /// Construct a new `DimmerTab`, creating all Win32 controls and restoring
-    /// persisted settings from `ini`.
-    ///
-    /// `main_hwnd` is the top-level window — used to arm/kill `TIMER_OVERLAY_FADE`.
+    /// Creates all Win32 controls and restores persisted settings from `ini`.
+    /// `main_hwnd` is used to arm/kill `TIMER_OVERLAY_FADE`.
     pub unsafe fn new(
         parent:    HWND,
         hinstance: HINSTANCE,
@@ -594,7 +523,7 @@ impl DimmerTab {
     ) -> Self {
         let s = |px: i32| -> i32 { (px as f32 * dpi as f32 / 96.0).round() as i32 };
 
-        // ── Helper closures ───────────────────────────────────────────────────
+        // Helper closures
         let mk_static = |text: PCWSTR, extra_style: u32| -> HWND {
             let h = CreateWindowExW(
                 WS_EX_LEFT, w!("STATIC"), text,
@@ -645,15 +574,14 @@ impl DimmerTab {
             h
         };
 
-        // ── Create controls ───────────────────────────────────────────────────
+        // Create controls
         let h_lbl_dim_title = mk_static(w!("Taskbar Dimmer"), 0);
         let h_lbl_dim_sub   = mk_static(
             w!("Creates a dark overlay over the taskbar to help with burn-in."), 0);
         let h_chk_taskbar_dim = mk_check(w!("Enable Taskbar Dimmer"), IDC_CHK_TASKBAR_DIM);
 
-        // ── Section headings: 11pt bold — matches tab_crush / tab_hotkeys ─────
+        // Section headings — 11pt bold, matches tab_crush / tab_hotkeys.
         let font_sect = crate::ui_drawing::make_font_cached(w!("Segoe UI"), 11, dpi, true);
-        // font_sect is cached and reused across DPI changes.
 
         let h_lbl_dim_sect  = mk_static(w!("Dim Level"), SS_NOPREFIX);
         SendMessageW(h_lbl_dim_sect, WM_SETFONT, WPARAM(font_sect.0 as usize), LPARAM(1));
@@ -674,13 +602,13 @@ impl DimmerTab {
         install_action_btn_hover(h_btn_dim_defaults);
         let h_sld_taskbar_dim    = mk_slider(IDC_SLD_TASKBAR_DIM, 0, 100, 90);
 
-        // Apply special fonts.
+        // Title and value labels get special fonts.
         SendMessageW(h_lbl_dim_title,    WM_SETFONT, WPARAM(font_title.0    as usize), LPARAM(1));
         SendMessageW(h_lbl_dim_pct,      WM_SETFONT, WPARAM(font_bold_val.0 as usize), LPARAM(1));
         SendMessageW(h_lbl_fade_in_val,  WM_SETFONT, WPARAM(font_bold_val.0 as usize), LPARAM(1));
         SendMessageW(h_lbl_fade_out_val, WM_SETFONT, WPARAM(font_bold_val.0 as usize), LPARAM(1));
 
-        // ── Restore persisted state ───────────────────────────────────────────
+        // Restore persisted state.
         let enabled = ini.read_int("_state", "TaskbarDimEnabled", 0) != 0;
         SendMessageW(h_chk_taskbar_dim, BM_SETCHECK, WPARAM(enabled as usize), LPARAM(0));
 
@@ -714,7 +642,7 @@ impl DimmerTab {
         let fo_text: Vec<u16> = format!("{} ms\0", saved_fade_out).encode_utf16().collect();
         let _ = SetWindowTextW(h_lbl_fade_out_val, PCWSTR(fo_text.as_ptr()));
 
-        // ── Overlay initialisation ─────────────────────────────────────────────
+        // Overlay initialisation.
         let mut taskbar_overlays: Vec<HWND> = Vec::new();
         let (overlay_alpha_full, overlay_alpha_current, overlay_alpha_target,
              overlay_fade_start_alpha, overlay_fade_start_time);
@@ -739,13 +667,9 @@ impl DimmerTab {
             overlay_fade_start_time    = 0;
         }
 
-        // Build initial taskbar rect cache.
         let cached_taskbar_rects = collect_taskbar_rects();
-
-        // Initial fullscreen check against the current foreground window.
         let fullscreen_active = is_fullscreen_on_monitor(GetForegroundWindow());
 
-        // ── Build the conditional control group ────────────────────────────────
         let grp_dim_controls = ControlGroup::new(vec![
             h_lbl_dim_sect, h_sep_dim_sect, h_lbl_dim_pct,
             h_sld_taskbar_dim,
@@ -800,8 +724,7 @@ impl DimmerTab {
 
     // ── Command handlers ──────────────────────────────────────────────────────
 
-    /// Called when the "Enable Taskbar Dimmer" checkbox is clicked.
-    /// Returns a `(status_message, is_ok)` pair for the caller to display.
+    /// Handles "Enable Taskbar Dimmer" checkbox click. Returns `(status, is_ok)`.
     pub unsafe fn on_checkbox_toggled(
         &mut self,
         hwnd: HWND,
@@ -821,10 +744,7 @@ impl DimmerTab {
         ("", true)
     }
 
-    /// Called when the dim-level slider moves.
-    /// Returns a status string for the caller to display.
-    /// This is the combined version (visuals + save) used for programmatic calls
-    /// such as checkbox toggle, restore-defaults, and initial load.
+    /// Handles dim-level slider change (visuals + save). Used for programmatic calls.
     pub unsafe fn on_dim_slider_changed(
         &mut self,
         hwnd: HWND,
@@ -835,9 +755,8 @@ impl DimmerTab {
         msg
     }
 
-    /// Update the overlay alpha and label from the current slider position.
-    /// Does **not** write to disk — call `save_dim_slider` after drag ends.
-    /// Returns a status string (empty string = currently dimming).
+    /// Updates overlay alpha and label from the slider. Does not write to disk.
+    /// Returns a status string (empty = currently dimming).
     pub unsafe fn update_dim_visuals(&mut self, hwnd: HWND) -> String {
         let level = get_slider_val(self.h_sld_taskbar_dim).clamp(0, 100);
         let pct_text: Vec<u16> = format!("{}%\0", level).encode_utf16().collect();
@@ -878,16 +797,13 @@ impl DimmerTab {
         }
     }
 
-    /// Persist the current dim-level slider position to the INI file.
-    /// Call this once when the user releases the slider (TB_ENDTRACK).
+    /// Persists dim-level to INI. Call once on TB_ENDTRACK.
     pub fn save_dim_slider(&mut self, ini: &mut ProfileManager) {
         let level = unsafe { get_slider_val(self.h_sld_taskbar_dim).clamp(0, 100) };
         ini.write_int("_state", "TaskbarDimPct", level);
     }
 
-    /// Called when either fade slider moves.
-    /// `is_in` = true for "Fade in", false for "Fade out".
-    /// Combined version (visuals + save) for programmatic calls (restore-defaults etc.).
+    /// Handles fade slider change (visuals + save). `is_in`: true = fade-in slider.
     pub unsafe fn on_fade_slider_changed(
         &mut self,
         is_in: bool,
@@ -897,8 +813,7 @@ impl DimmerTab {
         self.save_fade_slider(is_in, ini);
     }
 
-    /// Update the fade label and runtime ms value from the current slider position.
-    /// Does **not** write to disk — call `save_fade_slider` after drag ends.
+    /// Updates fade label and runtime ms from slider. Does not write to disk.
     pub unsafe fn update_fade_visuals(&mut self, is_in: bool) {
         let (h_sld, h_lbl) = if is_in {
             (self.h_sld_fade_in,  self.h_lbl_fade_in_val)
@@ -919,8 +834,7 @@ impl DimmerTab {
         }
     }
 
-    /// Persist the current fade slider position to the INI file.
-    /// Call this once when the user releases the slider (TB_ENDTRACK).
+    /// Persists fade slider to INI. Call once on TB_ENDTRACK.
     pub unsafe fn save_fade_slider(&mut self, is_in: bool, ini: &mut ProfileManager) {
         let h_sld = if is_in { self.h_sld_fade_in } else { self.h_sld_fade_out };
         let raw_ms = get_slider_val(h_sld).clamp(0, 2000);
@@ -964,9 +878,7 @@ impl DimmerTab {
 
     // ── Fade timer tick ───────────────────────────────────────────────────────
 
-    /// Called on every `TIMER_OVERLAY_FADE` tick.
-    ///
-    /// Throttled logic for overlay alpha transitions and state polling.
+    /// Drives overlay alpha transitions and state polling. Called every TIMER_OVERLAY_FADE tick.
     pub unsafe fn tick_fade(&mut self) {
         if self.taskbar_overlays.is_empty() { return; }
 
@@ -974,7 +886,7 @@ impl DimmerTab {
 
         let is_animating = (self.overlay_alpha_current - self.overlay_alpha_target).abs() > 0.1;
 
-        // Hover detection via cached rects.
+        // Hover detection using cached rects — no EnumWindows on every tick.
         let hovering = if self.overlay_alpha_full > 0.5 {
             let mut cursor = POINT::default();
             GetCursorPos(&mut cursor);
@@ -986,7 +898,7 @@ impl DimmerTab {
             false
         };
 
-        // Throttled shell state polling.
+        // Heavy Win32 calls run every N ticks (~500 ms at idle).
         const HEAVY_POLL_EVERY_N_TICKS: u32 = 5;
 
         self.idle_heavy_tick = self.idle_heavy_tick.wrapping_add(1);
@@ -1003,19 +915,14 @@ impl DimmerTab {
                 self.taskbar_autohide = false;
             }
 
-            // 2. Menu open: removed — overlay no longer hides during menus.
-
-            // 3. Fullscreen: maintained by WinEvent hook + one-shot recheck timer.
-            //    If the feature is disabled, keep the cached value at false so the
-            //    suppress condition below never fires.
+            // Fullscreen state is maintained by WinEvent hook + one-shot recheck timer.
+            // When suppression is disabled, force the cached value to false.
             if !self.suppress_fs_enabled {
                 self.fullscreen_active = false;
             }
-            // (When suppress_fs_enabled is true, fullscreen_active is kept
-            //  up-to-date by on_fullscreen_check / TIMER_FULLSCREEN_RECHECK.)
         }
 
-        // ── Suppress conditions (read cached values — no new Win32 calls) ─────
+        // Suppress conditions — read cached values only, no new Win32 calls.
         let fs_hiding = self.fullscreen_active && self.suppress_fs_enabled;
         let ah_hiding = self.taskbar_autohide  && self.suppress_ah_enabled;
 
@@ -1050,7 +957,7 @@ impl DimmerTab {
             }
         }
 
-        // ── Interpolation ─────────────────────────────────────────────────────
+        // Ease-out quadratic interpolation toward target.
         let fade_duration = if self.overlay_alpha_target >= self.overlay_fade_start_alpha {
             self.overlay_fade_in_ms.max(1.0)
         } else {
@@ -1102,19 +1009,12 @@ impl DimmerTab {
 
     // ── Fullscreen cache update ───────────────────────────────────────────────
 
-    /// Called from the main WndProc when `WM_APP_FULLSCREEN_CHECK` arrives
-    /// (posted by `zorder_winevent_proc` on foreground / minimize-end events).
-    ///
-    /// Performs an immediate fullscreen check and also enforces overlay Z-order.
-    /// In addition, app.rs should arm TIMER_FULLSCREEN_RECHECK (~1 s one-shot)
-    /// after calling this, so late-sizing games are caught without polling.
+    /// Called on WM_APP_FULLSCREEN_CHECK (posted by `zorder_winevent_proc`).
+    /// Runs an immediate fullscreen check and re-asserts overlay Z-order.
+    /// Caller (app.rs) should also arm TIMER_FULLSCREEN_RECHECK for late-sizing games.
     pub unsafe fn on_fullscreen_check(&mut self, fg_hwnd: HWND) {
-        // Re-evaluate immediately — covers the common case where the foreground
-        // window is already at its final size when EVENT_SYSTEM_FOREGROUND fires.
         self.fullscreen_active = is_fullscreen_on_monitor(fg_hwnd);
 
-        // Also re-assert overlay Z-order now that the foreground has changed,
-        // rather than waiting for the next backup-interval tick.
         if !self.fullscreen_active {
             raise_and_log_overlay_zpos(&self.taskbar_overlays, &mut self.last_logged_zpos);
             self.last_zorder_enforce_tick = GetTickCount64();
@@ -1130,31 +1030,28 @@ impl DimmerTab {
 
     // ── Debug helpers ─────────────────────────────────────────────────────────
 
-    /// Force all overlay windows to the top of the Z-order immediately.
-    /// Intended for debug use only — bound to the '1' key while the debug tab
-    /// is active.  Logs a `OverlayRaised` entry for each overlay that was raised.
+    /// Force all overlays to Z-top immediately. Debug only — bound to '1' in the debug tab.
     pub unsafe fn force_raise_overlays(&mut self) {
         raise_and_log_overlay_zpos(&self.taskbar_overlays, &mut self.last_logged_zpos);
         self.last_zorder_enforce_tick = windows::Win32::System::SystemInformation::GetTickCount64();
 
-        // Also push an explicit "manual raise" marker to the log so it stands out.
-        if let Some(Ok(mut log)) = zorder_log() .map(|m| m.lock()) {
+        if let Some(Ok(mut log)) = zorder_log().map(|m| m.lock()) {
             log.push(
                 windows::Win32::System::SystemInformation::GetTickCount64(),
                 ZLogKind::OverlayRaised,
-                u64::MAX, // sentinel: u64::MAX = manual / debug trigger
+                u64::MAX, // u64::MAX = manual/debug trigger sentinel
                 "ManualRaise (debug key '1')".to_owned(),
             );
         }
     }
 
-    // ── Reposition window (simple 5-second refresh on display/rate change) ─────
+    // ── Overlay reposition ────────────────────────────────────────────────────
 
-    /// Hide overlays and start polling for taskbar reflow stabilization.
+    /// Hides overlays and starts polling for taskbar reflow stabilisation.
     pub unsafe fn start_reposition_overlays(&mut self) {
         if self.taskbar_overlays.is_empty() { return; }
 
-        // Hide overlays immediately — no visual artifact at the old position.
+        // Hide immediately to avoid showing the overlay at the old position.
         for h in &self.taskbar_overlays {
             if !h.0.is_null() {
                 SetWindowPos(*h, HWND_TOPMOST, 0, 0, 0, 0,
@@ -1162,21 +1059,17 @@ impl DimmerTab {
             }
         }
 
-        // Clear the rect cache so the first tick_reposition sample is never
-        // considered "identical to previous" (would show immediately before
-        // the taskbar has actually moved).
+        // Clear cache so the first tick_reposition sample is never treated as "settled".
         self.cached_taskbar_rects.clear();
 
-        // Block tick_fade from touching the overlay windows until we're done.
         self.is_repositioning = true;
 
-        // Arm a 5-second hard deadline.  tick_reposition will kill this timer
-        // early once the taskbar rect stabilises.
+        // 5-second hard deadline; tick_reposition kills this timer early once stable.
         self.reposition_until_tick = GetTickCount64() + 5000;
         let _ = SetTimer(self.main_hwnd, TIMER_OVERLAY_REPOSITION, 100, None);
     }
 
-    /// Reposition logic: shows overlays once taskbar rect stops changing.
+    /// Polls until taskbar rect stabilises, then shows overlays at the new position.
     pub unsafe fn tick_reposition(&mut self) {
         if !self.enabled || self.taskbar_overlays.is_empty() {
             KillTimer(self.main_hwnd, TIMER_OVERLAY_REPOSITION);
@@ -1185,11 +1078,9 @@ impl DimmerTab {
             return;
         }
 
-        // Sample current taskbar rects.
         let new_rects = collect_taskbar_rects();
 
-        // Check whether the taskbar has settled: same number of rects and
-        // every rect is identical to the previously cached one.
+        // Settled = same count and every rect matches the previous sample.
         let settled = !new_rects.is_empty()
             && new_rects.len() == self.cached_taskbar_rects.len()
             && new_rects.iter().zip(self.cached_taskbar_rects.iter()).all(|(a, b)| {
@@ -1200,13 +1091,10 @@ impl DimmerTab {
         // Always update the cache so the next tick compares against this sample.
         self.cached_taskbar_rects = new_rects;
 
-        // 5-second hard deadline: show the overlay regardless of stability.
         let now = GetTickCount64();
         let deadline_hit = self.reposition_until_tick != 0 && now >= self.reposition_until_tick;
 
         if settled || deadline_hit {
-            // Taskbar has stopped moving (or we've waited long enough) —
-            // show the overlay at the current position and stop polling.
             let alpha = self.overlay_alpha_current.round() as u8;
             for (h, r) in self.taskbar_overlays.iter().zip(self.cached_taskbar_rects.iter()) {
                 if h.0.is_null() { continue; }
@@ -1222,9 +1110,8 @@ impl DimmerTab {
 
             KillTimer(self.main_hwnd, TIMER_OVERLAY_REPOSITION);
             self.reposition_until_tick = 0;
-            self.is_repositioning = false; // allow tick_fade to resume
+            self.is_repositioning = false;
 
-            // Log outcome.
             if let Some(Ok(mut log)) = zorder_log().map(|m| m.lock()) {
                 let n = self.cached_taskbar_rects.len() as u64;
                 let rects_str: Vec<String> = self.cached_taskbar_rects.iter().map(|r|
@@ -1325,35 +1212,29 @@ unsafe fn sample_overlay_zpos(overlays: &[HWND]) -> Vec<u32> {
     }).collect()
 }
 
-/// Sample Z-order *before* raising overlays, raise them, then log only the
-/// overlays whose pre-raise position wasn't already `#1`.
-///
-/// Sampling before the raise is essential: after `SetWindowPos(HWND_TOPMOST)`
-/// every overlay is at `#1`, so a post-raise sample would never detect a
-/// displacement — it always looks fine regardless of what happened before.
-///
-/// `last` is indexed parallel to `overlays` and caches the last *pre-raise*
-/// position we already logged, so repeated identical displacements (overlay
-/// stuck at `#4` across multiple enforce cycles) are only logged once.
+/// Samples Z-order *before* raising overlays, raises them, then logs only
+/// overlays that weren't already at #1. Sampling pre-raise is essential —
+/// post-raise every overlay reads #1 regardless of prior displacement.
+/// `last` caches the last logged position per overlay to suppress repeat entries.
 unsafe fn raise_and_log_overlay_zpos(overlays: &[HWND], last: &mut Vec<u32>) {
     if overlays.is_empty() { return; }
 
-    // Grow the cache (u32::MAX initial value → first observation always logged).
+    // Grow cache; u32::MAX initial value ensures the first observation is always logged.
     if last.len() < overlays.len() {
         last.resize(overlays.len(), u32::MAX);
     }
 
-    // ── 1. Sample positions before the raise ──────────────────────────────────
+    // 1. Sample before raise.
     let positions = sample_overlay_zpos(overlays);
 
-    // ── 2. Raise all overlays ─────────────────────────────────────────────────
+    // 2. Raise all overlays.
     for &h in overlays {
         if h.0.is_null() { continue; }
         let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
     }
 
-    // ── 3. Log only changed, non-#1 positions (requires debug mode) ───────────
+    // 3. Log only changed, non-#1 positions (debug mode only).
     let Some(log_mutex) = zorder_log() else { return };
     let Ok(mut log) = log_mutex.lock() else { return };
     let tick = GetTickCount64();
@@ -1368,17 +1249,12 @@ unsafe fn raise_and_log_overlay_zpos(overlays: &[HWND], last: &mut Vec<u32>) {
 
 // ── Free functions (overlay management) ──────────────────────────────────────
 
-/// Enumerate all taskbar windows and return their screen RECTs.
-///
-/// This is the *only* place `EnumWindows` + `FindWindowW` should be called for
-/// hover-detection.  Call it on startup, on `WM_DISPLAYCHANGE`, and whenever
-/// overlay windows are rebuilt — **not** on every animation tick.
-// tab_dimmer.rs
-
+/// Returns taskbar RECTs for all monitors. Call on startup, WM_DISPLAYCHANGE,
+/// and overlay rebuild — not on every animation tick.
 unsafe fn collect_taskbar_rects() -> Vec<RECT> {
     let mut rects = Vec::new();
 
-    // This callback runs for every monitor. It's much faster than searching for window handles.
+    // EnumDisplayMonitors is faster than searching window handles per monitor.
     unsafe extern "system" fn monitor_enum_proc(
         hmonitor: HMONITOR,
         _: HDC,
@@ -1421,18 +1297,18 @@ unsafe fn collect_taskbar_rects() -> Vec<RECT> {
 }
 
 fn dim_level_to_alpha(level: i32) -> u8 {
-    // Pieceswise: quadratic 0-60% for smooth low-end, linear 60-100% for step resolution.
+    // Piecewise: quadratic 0–60% for smooth low-end, linear 60–100% for step resolution.
     const SPLIT: f32 = 0.60;
     const ALPHA_AT_SPLIT: f32 = 255.0 * (1.0 - (1.0 - SPLIT) * (1.0 - SPLIT));
 
     let t = (level as f32 / 100.0).clamp(0.0, 1.0);
     let alpha = if t <= SPLIT {
-        // Quadratic ease-in, normalised to [0, SPLIT].
+        // Quadratic ease-in over [0, SPLIT].
         let t_norm = t / SPLIT;
         let inv = 1.0 - t_norm;
         ALPHA_AT_SPLIT * (1.0 - inv * inv)
     } else {
-        // Linear ramp from ALPHA_AT_SPLIT → 255 over the remaining range.
+        // Linear ramp from ALPHA_AT_SPLIT → 255.
         let t_lin = (t - SPLIT) / (1.0 - SPLIT);
         ALPHA_AT_SPLIT + t_lin * (255.0 - ALPHA_AT_SPLIT)
     };
@@ -1490,11 +1366,8 @@ unsafe fn dim_all_taskbars(overlays: &mut Vec<HWND>, alpha: u8) {
 unsafe fn is_fullscreen_on_monitor(fg: HWND) -> bool {
     if fg.0.is_null() { return false; }
 
-    // ── Cheap checks first ────────────────────────────────────────────────────
-    // Visibility and rect-vs-monitor checks involve no string allocations.
-    // Most windowed apps fail here immediately, so GetClassNameW (which copies
-    // a string) is only reached for the rare window that actually covers the
-    // monitor.
+    // Cheap checks first — no string allocations. Most windowed apps fail here.
+    // GetClassNameW is only reached for windows that actually cover the monitor.
 
     if !IsWindowVisible(fg).as_bool() { return false; }
 
@@ -1519,8 +1392,7 @@ unsafe fn is_fullscreen_on_monitor(fg: HWND) -> bool {
 
     if !covers_monitor { return false; }
 
-    // ── Class-name check (only reached when window covers the monitor) ────────
-    // Filter out shell/desktop windows that happen to be full-monitor-sized.
+    // Class-name check — filters shell/desktop windows that happen to be full-monitor-sized.
     let mut cls_buf = [0u16; 64];
     let cls_len = GetClassNameW(fg, &mut cls_buf) as usize;
     if cls_len > 0 {

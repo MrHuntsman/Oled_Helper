@@ -1,4 +1,4 @@
-// tab_system.rs — System tab (tab index 2).
+// tab_system.rs — System tab (tab index 2): taskbar, power, and screensaver settings.
 
 #![allow(non_snake_case, unused_must_use, dead_code)]
 
@@ -30,13 +30,8 @@ use crate::{
 };
 
 
-
-
-
-//
-// Intercepts VK_RETURN so pressing Enter commits the typed value via the same
-// EN_KILLFOCUS (0x0200) WM_COMMAND path the parent uses for focus-loss commits.
-// DefSubclassProc handles everything else (digits, backspace, arrow keys, etc.).
+// Intercepts VK_RETURN to commit the typed value via the same EN_KILLFOCUS
+// path the parent uses for focus-loss commits.
 unsafe extern "system" fn ss_timeout_edit_subclass_proc(
     hwnd:    HWND,
     msg:     u32,
@@ -46,7 +41,7 @@ unsafe extern "system" fn ss_timeout_edit_subclass_proc(
     _data:   usize,
 ) -> LRESULT {
     if msg == WM_KEYDOWN && wparam.0 == 0x0D /* VK_RETURN */ {
-        // Post EN_KILLFOCUS (0x0200) to the parent so commit_ss_timeout fires.
+        // Post EN_KILLFOCUS to parent so commit_ss_timeout fires.
         let id  = GetDlgCtrlID(hwnd) as usize;
         let parent = GetParent(hwnd).unwrap_or_default();
         PostMessageW(parent, WM_COMMAND,
@@ -57,12 +52,8 @@ unsafe extern "system" fn ss_timeout_edit_subclass_proc(
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
-// ── Taskbar auto-hide API ─────────────────────────────────────────────────────
-//
-// SHAppBarMessage with ABM_GETSTATE / ABM_SETSTATE reads and writes the
-// taskbar auto-hide flag (ABS_AUTOHIDE = 0x01) system-wide.
-// The APPBARDATA struct must be zero-initialised with cbSize set; all other
-// fields are unused for these two messages.
+// ── Taskbar auto-hide ─────────────────────────────────────────────────────────
+// ABM_GETSTATE / ABM_SETSTATE read/write ABS_AUTOHIDE (0x01) system-wide.
 
 pub fn read_taskbar_autohide() -> bool {
     unsafe {
@@ -85,24 +76,15 @@ pub unsafe fn write_taskbar_autohide(enable: bool) {
 }
 
 // ── Power timeout API ─────────────────────────────────────────────────────────
-//
-// We read/write AC (plugged-in) power plan values only, using the active scheme.
-// Both timeouts are in seconds; 0 means "Never".
-//
-// GUIDs are stable across all Windows 10/11 versions:
-//   GUID_VIDEO_SUBGROUP          = 7516b95f-f776-4464-8c53-06167f40cc99
-//   GUID_VIDEO_POWERDOWN_TIMEOUT = 3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e
-//   GUID_STANDBY_SUBGROUP        = 238c9fa8-0aad-41ed-83f4-97be242c8f20  (= GUID_SLEEP_SUBGROUP)
-//   GUID_STANDBY_TIMEOUT         = 29f6c1db-86da-48c5-9fdb-f2b67b1f44da  (= GUID_STANDBY_TIMEOUT)
+// Reads/writes AC (plugged-in) values on the active scheme. Timeouts in
+// seconds; 0 = Never. GUIDs are stable across Windows 10/11.
 
 #[link(name = "kernel32")]
 extern "system" {
     fn LocalFree(hmem: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
 }
 
-/// `(label, seconds)` — 0 = Never.
-/// Control IDs for the power-timeout comboboxes.
-/// Declared here so `app.rs` can match them in `on_command`.
+/// Control IDs for the power-timeout comboboxes (matched in `app.rs::on_command`).
 pub const IDC_SYS_DDL_SCREEN_TIMEOUT:  usize = 0x0A10;
 pub const IDC_SYS_DDL_SLEEP_TIMEOUT:   usize = 0x0A11;
 pub const IDC_SYS_DDL_SCREENSAVER:     usize = 0x0A14;
@@ -127,8 +109,7 @@ pub const TIMEOUT_OPTIONS: &[(&str, u32)] = &[
     ("5 hours",    18000),
 ];
 
-/// Returns the index into `TIMEOUT_OPTIONS` whose seconds value is the
-/// closest match to `seconds`, or 0 ("Never") if nothing matches.
+/// Returns the index in `TIMEOUT_OPTIONS` matching `seconds`, or 0 ("Never").
 pub fn timeout_to_index(seconds: u32) -> usize {
     TIMEOUT_OPTIONS
         .iter()
@@ -136,8 +117,7 @@ pub fn timeout_to_index(seconds: u32) -> usize {
         .unwrap_or(0)
 }
 
-// GUIDs -----------------------------------------------------------------------
-
+// ── Power GUIDs ───────────────────────────────────────────────────────────────
 pub const GUID_VIDEO_SUBGROUP: GUID = GUID {
     data1: 0x7516b95f,
     data2: 0xf776,
@@ -166,7 +146,7 @@ pub const GUID_STANDBY_TIMEOUT: GUID = GUID {
     data4: [0x9f, 0xdb, 0xf2, 0xb6, 0x7b, 0x1f, 0x44, 0xda],
 };
 
-// Helpers ---------------------------------------------------------------------
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Returns the active power scheme GUID, or None on failure.
 unsafe fn active_scheme() -> Option<GUID> {
@@ -180,7 +160,7 @@ unsafe fn active_scheme() -> Option<GUID> {
     }
 }
 
-/// Read an AC power index (seconds). Returns None if the call fails.
+/// Read an AC power timeout (seconds). Returns None on failure.
 pub unsafe fn read_power_timeout(subgroup: &GUID, setting: &GUID) -> Option<u32> {
     let scheme = active_scheme()?;
     let mut value: u32 = 0;
@@ -197,8 +177,7 @@ pub unsafe fn read_power_timeout(subgroup: &GUID, setting: &GUID) -> Option<u32>
     }
 }
 
-/// Write an AC power index (seconds).
-/// Returns `(write_err, activate_err)` — both 0 on full success.
+/// Write an AC power timeout (seconds). Returns `(write_err, activate_err)`; both 0 on success.
 pub unsafe fn write_power_timeout(subgroup: &GUID, setting: &GUID, seconds: u32) -> (u32, u32) {
     let scheme = match active_scheme() { Some(g) => g, None => return (u32::MAX, u32::MAX) };
     let write_err = PowerWriteACValueIndex(
@@ -215,8 +194,7 @@ pub unsafe fn write_power_timeout(subgroup: &GUID, setting: &GUID, seconds: u32)
     (write_err, activate_err)
 }
 
-// Public wrappers -------------------------------------------------------------
-
+// ── Public wrappers ───────────────────────────────────────────────────────────
 pub unsafe fn read_screen_timeout() -> Option<u32> {
     read_power_timeout(&GUID_VIDEO_SUBGROUP, &GUID_VIDEO_POWERDOWN_TIMEOUT)
 }
@@ -234,12 +212,7 @@ pub unsafe fn write_sleep_timeout(seconds: u32) -> (u32, u32) {
 }
 
 // ── Screensaver API ───────────────────────────────────────────────────────────
-//
-// SystemParametersInfo with SPI_GETSCREENSAVEACTIVE / SPI_SETSCREENSAVEACTIVE
-// reads/writes whether the screensaver is enabled at all.
-// SPI_GETSCREENSAVETIMEOUT / SPI_SETSCREENSAVETIMEOUT reads/writes the idle
-// delay in seconds.  Both calls are user-session scoped and take effect
-// immediately without a reboot.
+// SPI_GETSCREENSAVE* / SPI_SETSCREENSAVE* — user-session scoped, no reboot.
 
 pub fn read_screensaver_active() -> bool {
     // SPI_GETSCREENSAVEACTIVE returns its BOOL result in pvParam.
@@ -266,7 +239,6 @@ pub unsafe fn write_screensaver_active(enabled: bool) -> bool {
 }
 
 /// Returns the screensaver timeout in seconds, or 0 on failure.
-/// SPI_GETSCREENSAVETIMEOUT returns its result in pvParam (a *mut u32).
 pub fn read_screensaver_timeout() -> u32 {
     let mut secs: u32 = 0;
     unsafe {
@@ -292,13 +264,9 @@ pub unsafe fn write_screensaver_timeout(seconds: u32) -> bool {
 
 
 
-
-
 // ── Screensaver enumeration ───────────────────────────────────────────────────
 
-/// Read the current screensaver exe path from the registry.
-/// `HKCU\Control Panel\Desktop` → `SCRNSAVE.EXE`
-/// Returns empty string if none is set or the value is absent.
+/// Read `HKCU\Control Panel\Desktop\SCRNSAVE.EXE`. Returns "" if absent.
 pub fn read_screensaver_exe() -> String {
     let key_w:  Vec<u16> = "Control Panel\\Desktop\0".encode_utf16().collect();
     let val_w:  Vec<u16> = "SCRNSAVE.EXE\0".encode_utf16().collect();
@@ -316,7 +284,7 @@ pub fn read_screensaver_exe() -> String {
             Some(buf.as_mut_ptr()), Some(&mut size)) == ERROR_SUCCESS;
         RegCloseKey(hk);
         if !ok || size < 2 { return String::new(); }
-        // The value is REG_SZ stored as UTF-16 LE bytes.
+        // REG_SZ stored as UTF-16 LE bytes.
         let words: Vec<u16> = buf[..size as usize]
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -326,9 +294,7 @@ pub fn read_screensaver_exe() -> String {
     }
 }
 
-/// Write the screensaver exe path to the registry.
-/// `HKCU\Control Panel\Desktop` → `SCRNSAVE.EXE`
-/// Pass empty string to remove the value (disable screensaver).
+/// Write `HKCU\Control Panel\Desktop\SCRNSAVE.EXE`. Pass "" to remove (disable).
 pub unsafe fn write_screensaver_exe(path: &str) -> bool {
     let key_w: Vec<u16> = "Control Panel\\Desktop\0".encode_utf16().collect();
     let val_w: Vec<u16> = "SCRNSAVE.EXE\0".encode_utf16().collect();
@@ -339,7 +305,7 @@ pub unsafe fn write_screensaver_exe(path: &str) -> bool {
         return false;
     }
     let ok = if path.is_empty() {
-        // No screensaver — delete the value so Windows shows "(None)".
+        // Delete value — Windows then shows "(None)".
         RegDeleteValueW(hk, PCWSTR(val_w.as_ptr())) == ERROR_SUCCESS
     } else {
         // Store as REG_SZ (UTF-16 LE, null-terminated).
@@ -363,9 +329,8 @@ pub unsafe fn write_screensaver_exe(path: &str) -> bool {
     ok
 }
 
-/// Enumerate all .scr files in System32 (and SysWOW64 on 64-bit).
-/// Returns vec of (display_name, full_path), sorted by display_name.
-/// Index 0 is always ("(None)", "").
+/// Returns `(display_name, full_path)` for all .scr files in System32/SysWOW64,
+/// sorted by name. Index 0 is always `("(None)", "")`.
 pub fn enumerate_screensavers() -> Vec<(String, String)> {
     let mut list = vec![("(None)".to_string(), String::new())];
 
@@ -389,9 +354,9 @@ pub fn enumerate_screensavers() -> Vec<(String, String)> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_string();
-                // Deduplicate by stem (System32 and SysWOW64 often have the same files).
+                // Deduplicate by stem (System32 and SysWOW64 share many files).
                 if seen.insert(stem.to_lowercase()) {
-                    // Try to get the friendly name from the version resource description.
+                    // Use version resource FileDescription as display name.
                     let name = scr_display_name(&path_str).unwrap_or(stem);
                     list.push((name, path_str));
                 }
@@ -399,13 +364,11 @@ pub fn enumerate_screensavers() -> Vec<(String, String)> {
         }
     }
 
-    // Sort everything after index 0 alphabetically.
-    list[1..].sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    list[1..].sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase())); // sort after (None)
     list
 }
 
-/// Extract a friendly display name from a .scr file's version resource.
-/// Falls back to None if the resource is absent or can't be read.
+/// Extract `FileDescription` from a .scr version resource, or None if absent.
 fn scr_display_name(path: &str) -> Option<String> {
     use windows::Win32::Storage::FileSystem::{
         GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
@@ -423,7 +386,7 @@ fn scr_display_name(path: &str) -> Option<String> {
             windows::core::PCWSTR(wpath.as_ptr()), 0, size, buf.as_mut_ptr() as _
         ).is_err() { return None; }
 
-        // Try the English (0409) / Unicode (04B0) sub-block first, then any block.
+        // Try English/Unicode sub-block first, then fallback blocks.
         for lang_cp in &[r"\StringFileInfo\040904B0\FileDescription",
                          r"\StringFileInfo\040904E4\FileDescription",
                          r"\StringFileInfo\000004B0\FileDescription"] {
@@ -471,12 +434,11 @@ pub struct SystemTab {
     pub group:                ControlGroup,
     pub screen_timeout_idx:   usize,
     pub sleep_timeout_idx:    usize,
-    /// Index into screensavers vec (0 = None).
+    /// Index into screensavers vec; 0 = None.
     pub screensaver_idx:      usize,
-    /// (display_name, exe_path); index 0 is always ("(None)", "").
+    /// `(display_name, exe_path)`; index 0 is always `("(None)", "")`.
     pub screensavers:         Vec<(String, String)>,
-    /// Guard: set while we programmatically update the edit text to suppress
-    /// the resulting EN_CHANGE from re-entering. (Kept for future use if EN_CHANGE returns.)
+    /// Suppresses EN_CHANGE while we programmatically update the edit text.
     pub suppress_en_change:   bool,
 }
 
@@ -530,7 +492,7 @@ impl SystemTab {
         let h_lbl_screen_timeout  = cb.static_text(w!("Turn off screen after"), SS_NOPREFIX);
         let h_lbl_sleep_timeout   = cb.static_text(w!("Sleep after"), SS_NOPREFIX);
 
-        // CBS_DROPDOWNLIST | WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL
+        // CBS_DROPDOWNLIST | WS_VSCROLL (raw values — not in windows-rs consts).
         const CBS_DROPDOWNLIST: u32 = 0x0003;
         const WS_VSCROLL: u32       = 0x00200000;
         let ddl_style = WINDOW_STYLE(
@@ -552,7 +514,7 @@ impl SystemTab {
         SendMessageW(h_ddl_sleep_timeout,  WM_SETFONT,
             WPARAM(font_normal.0 as usize), LPARAM(1));
 
-        // Apply owner-draw subclass + item heights (matches tab_crush combo style).
+        // Owner-draw subclass + item heights (matches other tab combo style).
         SetWindowSubclass(h_ddl_screen_timeout, Some(combo_subclass_proc), 1, 0);
         SetWindowSubclass(h_ddl_sleep_timeout,  Some(combo_subclass_proc), 1, 0);
         let item_h = (20 * dpi / 96) as isize;
@@ -561,7 +523,6 @@ impl SystemTab {
         SendMessageW(h_ddl_sleep_timeout,  CB_SETITEMHEIGHT, WPARAM(usize::MAX), LPARAM(item_h));
         SendMessageW(h_ddl_sleep_timeout,  CB_SETITEMHEIGHT, WPARAM(0),          LPARAM(item_h));
 
-        // Populate both dropdowns with the shared TIMEOUT_OPTIONS list.
         for &(label, _) in TIMEOUT_OPTIONS {
             let lw: Vec<u16> = label.encode_utf16().chain([0]).collect();
             SendMessageW(h_ddl_screen_timeout, CB_ADDSTRING, WPARAM(0),
@@ -570,7 +531,6 @@ impl SystemTab {
                 LPARAM(lw.as_ptr() as isize));
         }
 
-        // Read current AC values and select the matching entry.
         let screen_timeout_idx = read_screen_timeout()
             .map(timeout_to_index).unwrap_or(0);
         let sleep_timeout_idx  = read_sleep_timeout()
@@ -595,10 +555,7 @@ impl SystemTab {
         let h_lbl_ss_timeout   = cb.static_text(w!("Wait"), SS_NOPREFIX);
         let h_lbl_ss_minutes   = cb.static_text(w!("minutes"), SS_NOPREFIX);
 
-        // Numeric edit + updown spinner for screensaver timeout (minutes, 1–999).
-        // ES_NUMBER restricts input to digits only.
-        // The updown (msctls_updown32) attaches itself to the right edge of the
-        // buddy edit via UDS_AUTOBUDDY | UDS_ALIGNRIGHT | UDS_SETBUDDYINT.
+        // Numeric edit (ES_NUMBER) + updown spinner for screensaver timeout (1–999 min).
         let ss_secs = read_screensaver_timeout();
         let ss_mins = (ss_secs / 60).max(1);
         let h_edt_ss_timeout = {
@@ -614,15 +571,10 @@ impl SystemTab {
         };
         SendMessageW(h_edt_ss_timeout, WM_SETFONT,
             WPARAM(font_normal.0 as usize), LPARAM(1));
-        // Subclass: pressing Enter commits the value (same path as focus loss).
+        // Subclass: Enter commits value (same path as focus loss).
         SetWindowSubclass(h_edt_ss_timeout, Some(ss_timeout_edit_subclass_proc),
             IDC_SYS_EDT_SS_TIMEOUT, 0);
 
-        // UDS_AUTOBUDDY    — adopt the previous control (the edit) as buddy
-        // UDS_ALIGNRIGHT   — dock arrows to the right edge of the buddy
-        // UDS_SETBUDDYINT  — keep buddy text in sync when arrows are clicked
-        // UDS_ARROWKEYS    — respond to Up/Down keyboard keys
-        // UDS_NOTHOUSANDS  — no thousands separator in the buddy text
         const UDS_WRAP:         u32 = 0x0001;
         const UDS_SETBUDDYINT:  u32 = 0x0002;
         const UDS_ALIGNRIGHT:   u32 = 0x0004;
@@ -638,13 +590,12 @@ impl SystemTab {
             0, 0, 0, 0,
             parent, HMENU(ptr::null_mut()), hinstance, None,
         ).unwrap_or_default();
-        // Range: 1 – 999 minutes.  UDM_SETRANGE32 avoids the 16-bit limit.
+        // UDM_SETRANGE32 avoids the 16-bit limit of UDM_SETRANGE.
         SendMessageW(h_spin_ss, windows::Win32::UI::Controls::UDM_SETRANGE32,
             WPARAM(1), LPARAM(999));
         SendMessageW(h_spin_ss, windows::Win32::UI::Controls::UDM_SETPOS32,
             WPARAM(0), LPARAM(ss_mins as isize));
 
-        // Populate screensaver dropdown.
         let screensavers = enumerate_screensavers();
         let current_exe  = read_screensaver_exe().to_lowercase();
         let screensaver_idx = screensavers.iter().position(|(_, p)| {
@@ -662,8 +613,7 @@ impl SystemTab {
         }
         SendMessageW(h_ddl_screensaver, CB_SETCURSEL, WPARAM(screensaver_idx), LPARAM(0));
 
-        // Disable the interactive wait controls when no screensaver is selected.
-        // Static labels ("Wait" / "minutes") are left always-enabled to avoid the greyed shadow.
+        // Disable wait controls when no screensaver selected; static labels stay enabled.
         let ss_enabled = screensaver_idx != 0;
         windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(h_edt_ss_timeout, ss_enabled);
         windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(h_spin_ss,        ss_enabled);
@@ -719,8 +669,7 @@ impl SystemTab {
         SendMessageW(self.h_ddl_sleep_timeout,  CB_SETCURSEL,
             WPARAM(self.sleep_timeout_idx),  LPARAM(0));
 
-        // Re-read the current screensaver from the registry on every refresh.
-        // Registry reads are reliable; the old SPI_GETSCREENSAVER was not.
+        // Re-read from registry (more reliable than SPI_GETSCREENSAVER).
         let current_exe = read_screensaver_exe().to_lowercase();
         self.screensaver_idx = self.screensavers.iter().position(|(_, p)| {
             let scr_file = std::path::Path::new(p)
@@ -784,7 +733,7 @@ impl SystemTab {
         self.screensaver_idx = sel;
         let path = &self.screensavers[sel].1.clone();
         let ok = write_screensaver_exe(path);
-        // Only toggle enable/disable if the state actually changed to avoid flickering.
+        // Only toggle if state changed — avoids flicker.
         let ss_enabled = sel != 0;
         if ss_enabled != was_enabled {
             windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(self.h_edt_ss_timeout, ss_enabled);
@@ -798,24 +747,18 @@ impl SystemTab {
         }
     }
 
-    /// Called from WM_NOTIFY / UDN_DELTAPOS with the already-computed new value
-    /// (iPos + iDelta), since the edit text has not been updated yet at that point.
-    /// Also updates the edit control text immediately so the field reflects the
-    /// new value without waiting for UDS_SETBUDDYINT to fire.
+    /// Called from WM_NOTIFY / UDN_DELTAPOS with the pre-computed new value.
+    /// Updates edit text immediately rather than waiting for UDS_SETBUDDYINT.
     pub unsafe fn on_ss_timeout_set(&mut self, mins: u32) -> String {
         let mins = mins.clamp(1, 999);
-        // Update edit text immediately — UDS_SETBUDDYINT will do this too, but
-        // only after DefWindowProcW returns, so the field would lag one click.
-        // Guard suppresses the EN_CHANGE this triggers, avoiding infinite recursion.
+        // Update edit immediately — UDS_SETBUDDYINT fires after DefWindowProcW returns.
         let txt: Vec<u16> = format!("{}\0", mins).encode_utf16().collect();
         SetWindowTextW(self.h_edt_ss_timeout, PCWSTR(txt.as_ptr()));
-        // Keep the spinner's internal iPos in sync so successive arrow clicks
-        // use the correct base value. Must be done AFTER SetWindowTextW so the
-        // updown does not overwrite the edit (UDS_SETBUDDYINT is not set).
+        // Sync spinner iPos AFTER SetWindowTextW so it doesn't overwrite the edit.
         SendMessageW(self.h_spin_ss,
             windows::Win32::UI::Controls::UDM_SETPOS32,
             WPARAM(0), LPARAM(mins as isize));
-        // Place caret at end of text after programmatic update.
+        // Place caret at end after programmatic update.
         let end = mins.to_string().len();
         SendMessageW(self.h_edt_ss_timeout, EM_SETSEL, WPARAM(end), LPARAM(end as isize));
         let seconds = mins * 60;
@@ -834,7 +777,7 @@ impl SystemTab {
         let s = String::from_utf16_lossy(&buf[..len]);
         let mins: u32 = match s.trim().parse::<u32>() {
             Ok(v) if v >= 1 => v.min(999),
-            // Empty or invalid — restore the last known good value from the system.
+            // Invalid — restore last known good value from system.
             _ => {
                 let secs = read_screensaver_timeout();
                 let m = (secs / 60).max(1);
@@ -846,7 +789,7 @@ impl SystemTab {
                 return String::new();
             }
         };
-        // Normalise the edit text (e.g. strip leading zeros) and sync spinner.
+        // Normalise text (strip leading zeros) and sync spinner.
         let txt: Vec<u16> = format!("{}\0", mins).encode_utf16().collect();
         SetWindowTextW(self.h_edt_ss_timeout, PCWSTR(txt.as_ptr()));
         SendMessageW(self.h_spin_ss,
@@ -875,7 +818,5 @@ impl SystemTab {
             .encode_utf16().collect();
         unsafe { SetWindowTextW(hwnd, PCWSTR(text.as_ptr())); }
     }
-
-    // (cursor-hide methods removed)
 
 }

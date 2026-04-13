@@ -1,7 +1,5 @@
-// profile_manager.rs
-//
-// Simple ordered INI file manager.  Preserves section/key insertion order just
-// like the Win32 WritePrivateProfileString API does.
+// profile_manager.rs — ordered INI file manager.
+// Preserves section/key insertion order, matching Win32 WritePrivateProfileString behaviour.
 
 use std::{
     fs,
@@ -9,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// ── Section / key storage ─────────────────────────────────────────────────────
+// ── Storage ───────────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
 struct Section {
@@ -65,7 +63,7 @@ impl ProfileManager {
         Self { path, sections }
     }
 
-    // ── Core read/write ──────────────────────────────────────────────────────
+    // ── Read / write ─────────────────────────────────────────────────────────
 
     pub fn write(&mut self, section: &str, key: &str, value: &str) {
         if let Some(s) = self.sections.iter_mut().find(|s| s.name.eq_ignore_ascii_case(section)) {
@@ -92,39 +90,30 @@ impl ProfileManager {
         self.flush();
     }
 
-    /// Returns all section names in insertion order (in-memory order).
+    /// Returns all section names in insertion order.
     pub fn get_sections(&self) -> Vec<String> {
         self.sections.iter().map(|s| s.name.clone()).collect()
     }
 
-    // ── Typed convenience helpers ────────────────────────────────────────────
+    // ── Typed helpers ─────────────────────────────────────────────────────────
 
     pub fn read_int(&self, section: &str, key: &str, fallback: i32) -> i32 {
-        self.read(section, key, "")
-            .parse::<i32>()
-            .unwrap_or(fallback)
+        self.read(section, key, "").parse::<i32>().unwrap_or(fallback)
     }
 
     pub fn write_int(&mut self, section: &str, key: &str, value: i32) {
         self.write(section, key, &value.to_string());
     }
 
-    /// Returns the first profile section whose `LinkedHz` key equals `hz`,
-    /// skipping any sections in `skip`.
+    /// Returns the first profile section whose `LinkedHz` matches `hz`, skipping `skip`.
     pub fn find_profile_for_hz(&self, hz: i32, skip: &[&str]) -> Option<String> {
         for s in &self.sections {
-            if skip.iter().any(|sk| sk.eq_ignore_ascii_case(&s.name)) {
-                continue;
-            }
+            if skip.iter().any(|sk| sk.eq_ignore_ascii_case(&s.name)) { continue; }
             let linked = s.get("LinkedHz").and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
-            if linked == hz {
-                return Some(s.name.clone());
-            }
+            if linked == hz { return Some(s.name.clone()); }
         }
         None
     }
-
-    // ── Delete a single key without removing the whole section ───────────────
 
     pub fn delete_key(&mut self, section: &str, key: &str) {
         if let Some(s) = self.sections.iter_mut().find(|s| s.name.eq_ignore_ascii_case(section)) {
@@ -133,7 +122,7 @@ impl ProfileManager {
         self.flush();
     }
 
-    // ── Internal ─────────────────────────────────────────────────────────────
+    // ── Internal ──────────────────────────────────────────────────────────────
 
     fn flush(&self) {
         if let Ok(mut f) = fs::File::create(&self.path) {
@@ -147,27 +136,13 @@ impl ProfileManager {
         }
     }
 
-    /// Returns references to sections in a stable, human-readable order:
-    ///
-    ///   1. `[_state]`           — global app flags
-    ///   2. `[hz_*]` sections    — Hz profiles, sorted numerically descending (highest Hz first) by the
-    ///                             integer that follows the `hz_` prefix
-    ///   3. `[Hotkeys]`          — keyboard / mouse bindings
-    ///   4. `[Mouse]`            — cursor-hide setting
-    ///   5. Everything else      — in original insertion order
-    ///
-    /// Comparison is case-insensitive so capitalisation differences in the INI
-    /// file do not break the ordering.
+    /// Stable write order:
+    ///   1. `[_state]`
+    ///   2. `[hz_*]` — numerically descending
+    ///   3. `[Hotkeys]`
+    ///   4. `[Mouse]`
+    ///   5. Everything else — original insertion order
     fn sorted_sections(&self) -> Vec<&Section> {
-        // Build sort keys up-front into an owned Vec so sort_by_key never
-        // holds a borrow into the sections slice while sorting.
-        //
-        // Key layout: (tier, hz, original_index)
-        //   tier 0 = [_state]
-        //   tier 1 = [hz_*]  sorted numerically
-        //   tier 2 = [Hotkeys]
-        //   tier 3 = [Mouse]
-        //   tier 4 = everything else, original order preserved
         let keys: Vec<(u8, i32, usize)> = self.sections
             .iter()
             .enumerate()
@@ -197,13 +172,13 @@ impl ProfileManager {
 // ── Parser ────────────────────────────────────────────────────────────────────
 
 fn parse_ini(path: &Path) -> io::Result<Vec<Section>> {
-    let file    = fs::File::open(path)?;
-    let reader  = io::BufReader::new(file);
+    let file   = fs::File::open(path)?;
+    let reader = io::BufReader::new(file);
     let mut sections: Vec<Section> = Vec::new();
     let mut current: Option<Section> = None;
 
     for line in reader.lines() {
-        let line = line?;
+        let line    = line?;
         let trimmed = line.trim();
 
         if trimmed.starts_with(';') || trimmed.starts_with('#') || trimmed.is_empty() {
@@ -211,9 +186,7 @@ fn parse_ini(path: &Path) -> io::Result<Vec<Section>> {
         }
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if let Some(prev) = current.take() {
-                sections.push(prev);
-            }
+            if let Some(prev) = current.take() { sections.push(prev); }
             let name = trimmed[1..trimmed.len() - 1].trim().to_owned();
             current = Some(Section::new(&name));
         } else if let Some(eq) = trimmed.find('=') {
@@ -225,9 +198,7 @@ fn parse_ini(path: &Path) -> io::Result<Vec<Section>> {
         }
     }
 
-    if let Some(last) = current {
-        sections.push(last);
-    }
+    if let Some(last) = current { sections.push(last); }
 
     Ok(sections)
 }
