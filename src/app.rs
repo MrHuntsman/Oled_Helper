@@ -632,6 +632,9 @@ unsafe extern "system" fn wnd_proc(
                                 if !st.crush.previewing { apply_ramp(st, hwnd); }
                                 InvalidateRect(st.h_btn_hdr_toggle, None, true);
                                 UpdateWindow(st.h_btn_hdr_toggle);
+                                // Sync tray tooltip with new HDR state.
+                                let crush_val = crate::ui_drawing::get_slider_val(st.crush.h_sld_black);
+                                tray::update_tray_tooltip(hwnd, st.dimmer.enabled, crush_val, st.crush.hdr_panel.hdr_active);
                             }
 
                             // Poll gamma block independently of slider moves.
@@ -761,6 +764,7 @@ unsafe extern "system" fn wnd_proc(
                         st.ramp_dirty = false;
                         st.crush.on_black_slider_changed(&mut st.ini);
                         apply_ramp(st, hwnd);
+                        refresh_tray_state(st, hwnd);
                     } else {
                         // Mid-drag: apply gamma immediately and update visuals.
                         st.crush.on_black_slider_visual();
@@ -1053,6 +1057,7 @@ unsafe extern "system" fn wnd_proc(
                         if !msg.is_empty() {
                             set_status(st, msg, if ok { C_ACCENT } else { C_WARN });
                         }
+                        refresh_tray_state(st, hwnd);
                     }
                     HK_TOGGLE_CRUSH => {
                         if st.crush.previewing {
@@ -1088,6 +1093,7 @@ unsafe extern "system" fn wnd_proc(
                         st.crush.on_black_slider_changed(&mut st.ini);
                         apply_ramp(st, hwnd);
                         InvalidateRect(st.crush.h_sld_black, None, false);
+                        refresh_tray_state(st, hwnd);
                         if let Some((_, vk)) = parse_hotkey(&st.ini.read("Hotkeys", "DecreaseBlackCrush", "None")) {
                             st.crush_repeat_delta = -1;
                             st.crush_repeat_initial = true;
@@ -1103,6 +1109,7 @@ unsafe extern "system" fn wnd_proc(
                         st.crush.on_black_slider_changed(&mut st.ini);
                         apply_ramp(st, hwnd);
                         InvalidateRect(st.crush.h_sld_black, None, false);
+                        refresh_tray_state(st, hwnd);
                         if let Some((_, vk)) = parse_hotkey(&st.ini.read("Hotkeys", "IncreaseBlackCrush", "None")) {
                             st.crush_repeat_delta = 1;
                             st.crush_repeat_initial = true;
@@ -1113,6 +1120,7 @@ unsafe extern "system" fn wnd_proc(
                     HK_TOGGLE_HDR => {
                         toggle_hdr_via_shortcut();
                         st.crush.hdr_panel.schedule_hdr_recheck();
+                        // Tooltip updated on next TIMER_HDR tick when HDR state settles.
                     }
                     x if x == HK_DEBUG_FORCE_RAISE as usize && is_debug_mode() => {
                         st.dimmer.force_raise_overlays();
@@ -1171,6 +1179,10 @@ unsafe extern "system" fn wnd_proc(
                         let mut pt = POINT::default();
                         GetCursorPos(&mut pt);
                         SetForegroundWindow(hwnd);
+                        // Rebuild so checkmarks always reflect current state.
+                        let old = st.tray_menu;
+                        st.tray_menu = build_tray_menu_for_state(st);
+                        DestroyMenu(old);
                         st.dimmer.suppress_tray_menu = true;
                         TrackPopupMenu(
                             st.tray_menu,
@@ -1443,8 +1455,6 @@ unsafe fn create_state(hwnd: HWND, ini_path: PathBuf) -> AppState {
         SetWindowSubclass(h, Some(nav_btn_subclass_proc), 1, 0);
     }
 
-    let tray_menu = tray::build_tray_menu();
-
     let mut ini = ProfileManager::new(&ini_path);
 
     // ── Construct tab sub-states ──────────────────────────────────────────────
@@ -1495,7 +1505,7 @@ unsafe fn create_state(hwnd: HWND, ini_path: PathBuf) -> AppState {
         tab_header_icons,
         bg_brush, bg3_brush, sep_brush,
         _font_normal, _font_title, _font_bold_val,
-        tray_menu, tray_added: false,
+        tray_menu: unsafe { windows::Win32::UI::WindowsAndMessaging::CreatePopupMenu().unwrap_or_default() }, tray_added: false,
         tray_balloon_shown: ini.read("App", "TrayBalloonShown", "0") == "1",
         ini,
         status_color: C_ACCENT,
@@ -1554,6 +1564,8 @@ unsafe fn create_state(hwnd: HWND, ini_path: PathBuf) -> AppState {
     ui_drawing::subclass_tab_header(state.about.h_lbl_title,  state.tab_header_icons.about);
     apply_ramp(&mut state, hwnd);
 
+    let tray_menu = build_tray_menu_for_state(&state);
+    state.tray_menu = tray_menu;
     tray::add_tray_icon(hwnd, hinstance, &mut state.tray_added);
     register_hotkeys(&state.ini, &mut state.mouse_hotkeys, hwnd);
 
@@ -1691,6 +1703,60 @@ fn nav_btn_to_tab(id: usize) -> Option<usize> {
     }
 }
 
+// ── Tray menu helpers ─────────────────────────────────────────────────────────
+
+/// Enumerate the refresh-rate combobox to build the tray profile list.
+///
+/// Returns `(items, active_index)` where each item is
+/// `(combobox_index_str, display_label)`. The combobox index is stored as
+/// the "key" so the apply handler can call `CB_SETCURSEL` directly without
+/// re-scanning. Active index reflects the currently selected combobox entry.
+unsafe fn tray_profile_list(st: &AppState) -> (Vec<(String, String)>, Option<usize>) {
+    let h_ddl = st.crush.h_ddl_refresh;
+    let count = SendMessageW(h_ddl, CB_GETCOUNT, WPARAM(0), LPARAM(0)).0;
+    if count <= 0 { return (Vec::new(), None); }
+
+    let cur_sel = SendMessageW(h_ddl, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+
+    let mut profiles: Vec<(String, String)> = Vec::new();
+    let mut active: Option<usize> = None;
+    let mut buf = vec![0u16; 64];
+
+    for i in 0..count as usize {
+        let len = SendMessageW(h_ddl, CB_GETLBTEXTLEN, WPARAM(i), LPARAM(0)).0;
+        if len <= 0 { continue; }
+        buf.resize((len as usize) + 1, 0);
+        SendMessageW(h_ddl, CB_GETLBTEXT, WPARAM(i), LPARAM(buf.as_mut_ptr() as isize));
+        let label = String::from_utf16_lossy(&buf[..len as usize]);
+        if i == cur_sel as usize {
+            active = Some(profiles.len());
+        }
+        profiles.push((i.to_string(), label));
+    }
+    (profiles, active)
+}
+
+unsafe fn build_tray_menu_for_state(st: &AppState) -> windows::Win32::UI::WindowsAndMessaging::HMENU {
+    let (profiles, active_profile) = tray_profile_list(st);
+    tray::build_tray_menu(&tray::TrayMenuState {
+        dimmer_on:      st.dimmer.enabled,
+        hdr_on:         st.crush.hdr_panel.hdr_active,
+        hdr_avail:      true, // no separate availability field; always show as enabled
+        profiles:       &profiles,
+        active_profile,
+    })
+}
+
+/// Rebuild tray menu and update tooltip to reflect current state.
+/// Call after any state change that affects the tray (dimmer toggle, crush change, HDR change).
+unsafe fn refresh_tray_state(st: &mut AppState, hwnd: HWND) {
+    let old = st.tray_menu;
+    st.tray_menu = build_tray_menu_for_state(st);
+    windows::Win32::UI::WindowsAndMessaging::DestroyMenu(old);
+    let crush_val = crate::ui_drawing::get_slider_val(st.crush.h_sld_black);
+    tray::update_tray_tooltip(hwnd, st.dimmer.enabled, crush_val, st.crush.hdr_panel.hdr_active);
+}
+
 // ── Command handler ───────────────────────────────────────────────────────────
 
 unsafe fn on_command(st: &mut AppState, hwnd: HWND, id: usize, notify: u32, _ctrl: HWND) {
@@ -1749,6 +1815,7 @@ unsafe fn on_command(st: &mut AppState, hwnd: HWND, id: usize, notify: u32, _ctr
             toggle_hdr_via_shortcut();
             // Recheck needed — Windows takes time to settle after Win+Alt+B.
             st.crush.hdr_panel.schedule_hdr_recheck();
+            // Tooltip updated on next TIMER_HDR tick when HDR state settles.
         }
         IDC_BTN_QUIT     => { tray::remove_tray_icon(hwnd, st.tray_menu, &mut st.tray_added); DestroyWindow(hwnd); }
         IDC_BTN_MINIMIZE => { st.crush.hdr_panel.suspend_d3d(); ShowWindow(hwnd, SW_HIDE); }
@@ -1793,6 +1860,7 @@ unsafe fn on_command(st: &mut AppState, hwnd: HWND, id: usize, notify: u32, _ctr
             if !msg.is_empty() {
                 set_status(st, msg, if ok { C_ACCENT } else { C_WARN });
             }
+            refresh_tray_state(st, hwnd);
         }
         id if (id == IDC_CHK_SUPPRESS_FS as usize
                || id == IDC_CHK_SUPPRESS_AH as usize)
@@ -1819,6 +1887,60 @@ unsafe fn on_command(st: &mut AppState, hwnd: HWND, id: usize, notify: u32, _ctr
             DestroyWindow(hwnd);
         }
         202 => { tray::remove_tray_icon(hwnd, st.tray_menu, &mut st.tray_added); DestroyWindow(hwnd); }
+
+        // ── Tray quick-action toggles ─────────────────────────────────────────
+        x if x == tray::TRAY_CMD_TOGGLE_DIMMER as usize => {
+            let (msg, ok) = st.dimmer.on_checkbox_toggled(hwnd, &mut st.ini);
+            show_tab(st, hwnd);
+            if !msg.is_empty() {
+                set_status(st, msg, if ok { C_ACCENT } else { C_WARN });
+            }
+            refresh_tray_state(st, hwnd);
+        }
+        x if x == tray::TRAY_CMD_TOGGLE_HDR as usize => {
+            toggle_hdr_via_shortcut();
+            st.crush.hdr_panel.schedule_hdr_recheck();
+            // Tooltip updated on next TIMER_HDR tick when HDR state settles.
+        }
+
+        // ── Tray profile submenu ──────────────────────────────────────────────
+        // Each item key is a combobox index (as a string). Selecting one sets
+        // CB_SETCURSEL on the refresh-rate dropdown then fires the same code
+        // path as the user choosing from the dropdown directly.
+        x if x >= tray::TRAY_CMD_PROFILE_BASE as usize => {
+            let (profiles, _) = tray_profile_list(st);
+            let menu_idx = x - tray::TRAY_CMD_PROFILE_BASE as usize;
+            if let Some((cb_idx_str, _label)) = profiles.get(menu_idx).cloned() {
+                if let Ok(cb_idx) = cb_idx_str.parse::<usize>() {
+                    // Select the item in the dropdown so apply_refresh_rate reads it.
+                    SendMessageW(st.crush.h_ddl_refresh, CB_SETCURSEL,
+                        WPARAM(cb_idx), LPARAM(0));
+                    // Mirror IDC_DDL_REFRESH / CBN_SELCHANGE exactly.
+                    match st.crush.apply_refresh_rate() {
+                        Ok(hz) => {
+                            rearm_render_timer(hwnd);
+                            update_slider_anim_interval(hz as i32);
+                            crate::tab_dimmer::set_fade_interval_from_hz(hz as i32);
+                            if let Some((_, status)) =
+                                st.crush.try_auto_load_profile_for_hz(hz as i32, &mut st.ini)
+                            {
+                                set_status(st, &status, C_ACCENT);
+                            } else {
+                                set_status(st, &format!("Refresh rate: {} Hz", hz), C_ACCENT);
+                                apply_ramp(st, hwnd);
+                            }
+                            if st.dimmer.enabled {
+                                st.dimmer.start_reposition_overlays();
+                            }
+                        }
+                        Err(code) => {
+                            set_error(st, &format!("Failed to set refresh rate (code {})", code));
+                        }
+                    }
+                    refresh_tray_state(st, hwnd);
+                }
+            }
+        }
        
         // Clear button — clear the row then auto-save + re-register.
         id if (IDC_HK_CLR_TOGGLE_DIMMER..=IDC_HK_CLR_INCREASE).contains(&id)
