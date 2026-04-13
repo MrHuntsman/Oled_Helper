@@ -334,6 +334,7 @@ pub struct DimmerTab {
     // ── Suppression flags ─────────────────────────────────────────────────────
     pub suppress_fs_enabled: bool,  // hide overlay when fullscreen
     pub suppress_ah_enabled: bool,  // hide overlay when auto-hide active
+    pub suppress_tray_menu:  bool,  // hide overlay while tray context menu is open
 
     /// Needed to arm/kill the fade timer.
     main_hwnd: HWND,
@@ -709,6 +710,7 @@ impl DimmerTab {
             // Defaults: suppress (hide) overlay when fullscreen/auto-hide active.
             suppress_fs_enabled:   true,
             suppress_ah_enabled:   true,
+            suppress_tray_menu:    false,
             main_hwnd,
             cached_taskbar_rects,
             last_applied_alpha: 0,
@@ -923,11 +925,12 @@ impl DimmerTab {
         }
 
         // Suppress conditions — read cached values only, no new Win32 calls.
-        let fs_hiding = self.fullscreen_active && self.suppress_fs_enabled;
-        let ah_hiding = self.taskbar_autohide  && self.suppress_ah_enabled;
+        let fs_hiding   = self.fullscreen_active && self.suppress_fs_enabled;
+        let ah_hiding   = self.taskbar_autohide  && self.suppress_ah_enabled;
+        let menu_hiding = self.suppress_tray_menu;
 
         let new_target =
-            if hovering || fs_hiding || ah_hiding { 0.0 }
+            if hovering || fs_hiding || ah_hiding || menu_hiding { 0.0 }
             else { self.overlay_alpha_full };
 
         if (new_target - self.overlay_alpha_target).abs() > 0.5 {
@@ -936,22 +939,24 @@ impl DimmerTab {
             self.overlay_fade_start_alpha = self.overlay_alpha_current;
 
             if let Some(Ok(mut log)) = zorder_log().map(|m| m.lock()) {
-                let reason = match (hovering, fs_hiding, ah_hiding) {
-                    (true,  _,     _    ) => "hover → fade out",
-                    (_,     true,  _    ) => "fullscreen → suppress",
-                    (_,     _,     true ) => "auto-hide → suppress",
-                    _                     => "conditions cleared → fade in",
+                let reason = match (hovering, fs_hiding, ah_hiding, menu_hiding) {
+                    (true, ..)      => "hover → fade out",
+                    (_, true, ..)   => "fullscreen → suppress",
+                    (_, _, true, _) => "auto-hide → suppress",
+                    (.., true)      => "tray menu → suppress",
+                    _               => "conditions cleared → fade in",
                 };
                 let payload: u64 =
-                    (hovering   as u64)       |
-                    (fs_hiding  as u64) << 1  |
-                    (ah_hiding  as u64) << 2  |
-                    (self.enabled as u64) << 3;
+                    (hovering     as u64)       |
+                    (fs_hiding    as u64) << 1  |
+                    (ah_hiding    as u64) << 2  |
+                    (self.enabled as u64) << 3  |
+                    (menu_hiding  as u64) << 4;
                 let detail = format!(
-                    "[DM] {} | target α={:.0} | hover={} fs={} ah={}",
+                    "[DM] {} | target α={:.0} | hover={} fs={} ah={} menu={}",
                     reason,
                     new_target,
-                    hovering, fs_hiding, ah_hiding,
+                    hovering, fs_hiding, ah_hiding, menu_hiding,
                 );
                 log.push(GetTickCount64(), ZLogKind::DimmerStateChange, payload, detail);
             }

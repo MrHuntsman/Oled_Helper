@@ -1171,11 +1171,13 @@ unsafe extern "system" fn wnd_proc(
                         let mut pt = POINT::default();
                         GetCursorPos(&mut pt);
                         SetForegroundWindow(hwnd);
+                        st.dimmer.suppress_tray_menu = true;
                         TrackPopupMenu(
                             st.tray_menu,
                             TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
                             pt.x, pt.y, 0, hwnd, None,
                         );
+                        st.dimmer.suppress_tray_menu = false;
                     }
                 }
                 _ => {}
