@@ -17,7 +17,7 @@ use windows::{
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu,
                 LoadIconW, IDI_APPLICATION,
-                HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+                HMENU, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
                 MENU_ITEM_FLAGS,
             },
         },
@@ -63,17 +63,16 @@ pub unsafe fn build_tray_menu(state: &TrayMenuState) -> HMENU {
     // Quick-action toggles with checkmarks
     append_str(
         menu,
-        MF_STRING | if state.dimmer_on { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+        MF_STRING,
         TRAY_CMD_TOGGLE_DIMMER,
-        "Taskbar Dimmer",
+        &checked_label(state.dimmer_on, "Taskbar Dimmer"),
     );
     append_str(
         menu,
         MF_STRING
-            | if state.hdr_on    { MF_CHECKED } else { MENU_ITEM_FLAGS(0) }
-            | if !state.hdr_avail { MF_GRAYED  } else { MENU_ITEM_FLAGS(0) },
+            | if !state.hdr_avail { MF_GRAYED } else { MENU_ITEM_FLAGS(0) },
         TRAY_CMD_TOGGLE_HDR,
-        "HDR",
+        &checked_label(state.hdr_on, "HDR"),
     );
 
     // Profile submenu (only shown when profiles exist)
@@ -82,12 +81,12 @@ pub unsafe fn build_tray_menu(state: &TrayMenuState) -> HMENU {
         let sub = CreatePopupMenu().unwrap_or_default();
         for (i, (_sec, label)) in state.profiles.iter().enumerate() {
             let id = TRAY_CMD_PROFILE_BASE + i as u32;
+            let active = state.active_profile == Some(i);
             append_str(
                 sub,
-                MF_STRING
-                    | if state.active_profile == Some(i) { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+                MF_STRING,
                 id,
-                label,
+                &checked_label(active, label),
             );
         }
         let lbl: Vec<u16> = "Profile\0".encode_utf16().collect();
@@ -193,10 +192,17 @@ pub unsafe fn remove_tray_icon(hwnd: HWND, tray_menu: HMENU, tray_added: &mut bo
     DestroyMenu(tray_menu);
 }
 
-// ── Internal helper ───────────────────────────────────────────────────────────
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
 #[allow(unused_must_use)]
 unsafe fn append_str(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u32, text: &str) {
     let w: Vec<u16> = format!("{text}\0").encode_utf16().collect();
     AppendMenuW(menu, flags, id as usize, PCWSTR(w.as_ptr()));
+}
+
+/// Prepends a visible Unicode checkmark to the label when `checked` is true,
+/// with matching indent on unchecked items so columns stay aligned.
+/// Supplements the native MF_CHECKED glyph which can be nearly invisible on dark themes.
+fn checked_label(checked: bool, label: &str) -> String {
+    if checked { format!("✓  {label}") } else { format!("    {label}") }
 }

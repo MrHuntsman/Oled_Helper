@@ -624,18 +624,21 @@ unsafe extern "system" fn wnd_proc(
 
                 match wparam.0 {
                     TIMER_HDR => {
-                        if ui_visible {
-                            // Only repaint if HDR status actually changed.
+                        {
+                            // Always poll HDR — driver restarts can flip state while minimized.
                             if st.crush.hdr_panel.refresh_hdr_status() {
-                                st.crush.update_sl_hint();
-                                st.crush.update_range_label();
-                                if !st.crush.previewing { apply_ramp(st, hwnd); }
-                                InvalidateRect(st.h_btn_hdr_toggle, None, true);
-                                UpdateWindow(st.h_btn_hdr_toggle);
-                                // Sync tray tooltip with new HDR state.
-                                let crush_val = crate::ui_drawing::get_slider_val(st.crush.h_sld_black);
-                                tray::update_tray_tooltip(hwnd, st.dimmer.enabled, crush_val, st.crush.hdr_panel.hdr_active);
+                                // Rebuild tray menu so the HDR checkmark stays in sync.
+                                refresh_tray_state(st, hwnd);
+                                if ui_visible {
+                                    st.crush.update_sl_hint();
+                                    st.crush.update_range_label();
+                                    if !st.crush.previewing { apply_ramp(st, hwnd); }
+                                    InvalidateRect(st.h_btn_hdr_toggle, None, true);
+                                    UpdateWindow(st.h_btn_hdr_toggle);
+                                }
                             }
+                        }
+                        if ui_visible {
 
                             // Poll gamma block independently of slider moves.
                             {
@@ -679,7 +682,8 @@ unsafe extern "system" fn wnd_proc(
                     }
                     TIMER_RENDER if ui_visible => {
                         if st.crush.hdr_panel.render_tick() {
-                            // HDR status changed on a retry tick.
+                            // HDR status changed on a retry tick — sync tray menu too.
+                            refresh_tray_state(st, hwnd);
                             st.crush.update_sl_hint();
                             st.crush.update_range_label();
                             if !st.crush.previewing { apply_ramp(st, hwnd); }
