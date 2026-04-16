@@ -1,7 +1,7 @@
 # OledHelper
 Windows utility to complement OLED TV/monitors. You can adjust black level per refresh rate with built-in calibration, a taskbar overlay dimmer and customizable hotkeys.
 
-![OledHelper](assets/OledHelperHDR.png)
+<img src="assets/crush_sdr.png" width="800">
 
 ---
 
