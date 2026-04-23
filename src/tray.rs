@@ -128,7 +128,7 @@ pub unsafe fn update_tray_tooltip(hwnd: HWND, dimmer_on: bool, crush_val: i32, h
     let crush_str;
     let mut parts: Vec<&str> = Vec::new();
     if dimmer_on               { parts.push("Dimmer ON"); }
-    if crush_val != 0          { crush_str = format!("Crush: {:+}", crush_val); parts.push(&crush_str); }
+    if crush_val != 0          { crush_str = format!("Crush: {:+}", crush_val / 10); parts.push(&crush_str); }
     if hdr_on                  { parts.push("HDR ON"); }
 
     let tip = if parts.is_empty() {

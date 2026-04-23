@@ -27,13 +27,13 @@ pub const C_BTN_ACTIVE_TEXT:   COLORREF = COLORREF(0x00DDDDDD);
 
 pub const C_SLIDER_TRACK: COLORREF = COLORREF(0x00555555);
 
-#[allow(dead_code)] pub const C_DDL_BTN:   COLORREF = COLORREF(0x00585858);
+
 pub const C_DDL_ARROW: COLORREF = COLORREF(0x00DDDDDD);
 
 // ── Static control styles (not in windows-rs) ─────────────────────────────────
-#[allow(dead_code)] pub const SS_LEFT:        u32 = 0x0000_0000;
-#[allow(dead_code)] pub const SS_CENTER:      u32 = 0x0000_0001;
-#[allow(dead_code)] pub const SS_CENTERIMAGE: u32 = 0x0000_0200; // vertically centres text
+pub const SS_LEFT:        u32 = 0x0000_0000;
+pub const SS_CENTER:      u32 = 0x0000_0001;
+pub const SS_CENTERIMAGE: u32 = 0x0000_0200; // vertically centres text
 pub const SS_NOPREFIX: u32 = 0x0000_0080;
 pub const SS_BLACKRECT: u32 = 0x0000_0004;
 pub const SS_NOTIFY:   u32 = 0x0000_0100;
@@ -71,7 +71,6 @@ pub const DEFAULT_BLACK: i32 = 0;
 pub const MIN_WIN_W: i32 = 720; // logical px at 96 DPI
 pub const MIN_WIN_H: i32 = 730;
 
-#[allow(dead_code)]
 pub const Z_ORDER_BACKUP_INTERVAL_MS: u32 = 100;
 
 // ── Control IDs ──────────────────────────────────────────────────────────────
@@ -84,7 +83,6 @@ pub const IDC_BTN_QUIT:    usize = 111;
 pub const IDC_DDL_REFRESH: usize = 112;
 pub const IDC_HDR_PANEL:   usize = 113;
 pub const IDC_BTN_MINIMIZE: usize = 114;
-#[allow(dead_code)]
 pub const IDC_CHK_TASKBAR_DIM: usize = 115;
 pub const IDC_SLD_TASKBAR_DIM: usize = 116;
 pub const IDC_SLD_FADE_IN:      usize = 118;
@@ -127,9 +125,3 @@ pub const IDC_ABOUT_BTN_UPDATE: usize = 250;
 
 /// Hotkey ID for debug-mode force-raise overlay (key '1'); registered only while debug tab is active.
 pub const HK_DEBUG_FORCE_RAISE: i32 = 50;
-
-// Debug-only IDs — kept for ABI stability; controls are unified into h_lst_zlog.
-#[allow(dead_code)] pub const IDC_DBG_ZPOS_KEY:    usize = 241;
-#[allow(dead_code)] pub const IDC_DBG_ZPOS_VAL:    usize = 242;
-#[allow(dead_code)] pub const IDC_LST_CLICK_LOG:   usize = 243;
-#[allow(dead_code)] pub const IDC_BTN_CLICK_CLEAR: usize = 244;
